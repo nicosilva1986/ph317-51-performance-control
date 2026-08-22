@@ -33,7 +33,7 @@ Max redujo la máxima 12 °C, redujo el promedio 10,5 °C y mejoró el throughpu
 - **Driver hygiene:** inventario, hashes, backups dobles y rebind reversible. Los binarios de terceros no se publican.
 - **Evidence first:** toda afirmación de rendimiento debe enlazar una carga reproducible, datos térmicos y ausencia/presencia de WHEA.
 
-Ver [arquitectura](docs/architecture.md), [inventario inicial](docs/hardware-and-driver-baseline.md), [plan Turbo nativo](docs/native-turbo-plan.md) y [recuperación](docs/recovery-and-rollback.md).
+Ver [uso y pruebas](docs/usage.md), [arquitectura](docs/architecture.md), [inventario inicial](docs/hardware-and-driver-baseline.md), [plan Turbo nativo](docs/native-turbo-plan.md) y [recuperación](docs/recovery-and-rollback.md).
 
 ## Seguridad
 

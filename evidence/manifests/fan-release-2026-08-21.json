@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "installedAt": "2026-08-21T23:22:55-03:00",
+  "platform": "Acer Predator PH317-51",
+  "artifacts": {
+    "controllerSha256": "5720D2206FE31EE94E40771BCF6548DCF40485BA361CFDE272CAEA06464BDA1D",
+    "configSha256": "B32BDEF1B120F40A979A3BD313ED11558E98582E90A1AD4B866E49898A48CED5",
+    "watchdogSha256": "B67CCF9B168E55379201789991EE2E3E028EED4F51FCD416085FA0AF49B94D8B",
+    "installerSha256": "1281684F05E9A70D8F775840CB19A4265FB161B648693191A200CA31B1A8FF48"
+  },
+  "installation": {
+    "controllerTask": "Running",
+    "watchdogTask": "Running",
+    "aclVerified": true,
+    "hashesVerified": true,
+    "rollbackAttempted": false,
+    "status": "PASS"
+  },
+  "readback": {
+    "state": "MAX",
+    "health": "HEALTHY_VERIFIED",
+    "fanBehavior": 512,
+    "cpuFanRpm": 6122,
+    "gpuFanRpm": 6122
+  },
+  "pathsIncluded": false,
+  "deviceIdentifiersIncluded": false,
+  "secretsIncluded": false
+}
