@@ -65,6 +65,14 @@ jobs:
         shell: powershell
         run: .\tests\Test-AcerFanWatchdog.ps1
 
+      - name: Agent-safe fan status reader — PowerShell 7
+        shell: pwsh
+        run: .\tests\Test-AcerFanAgentStatus.ps1
+
+      - name: Agent-safe fan status reader — Windows PowerShell 5.1
+        shell: powershell
+        run: .\tests\Test-AcerFanAgentStatus.ps1
+
       - name: CRUWBlocker preflight invariant tests
         shell: pwsh
         run: .\tests\Test-CRUWBlockerPreflightCore.ps1
