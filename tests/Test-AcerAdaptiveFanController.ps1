@@ -117,6 +117,19 @@ try {
     $caseResults.Add([ordered]@{ name = 'transient-non-idle-sample-pauses-release'; status = 'PASS' })
 
     $samples = [System.Collections.Generic.List[object]]::new()
+    1..150 | ForEach-Object { $samples.Add((New-Sample 48 0 45 8 10)) }
+    $samples.Add((New-Sample 48 0 45 10 80))
+    $samples.Add((New-Sample 48 0 45 8 10))
+    $case = Invoke-SimulationCase -Name 'transient-logical-core-spike-pauses-release' -InitialState MAX -Samples $samples
+    $transitions = @($case.result.transitions)
+    $expectedRelease = [datetimeoffset]'2026-01-01T00:05:02Z'
+    $actualRelease = if ($transitions.Count -eq 1) { ([datetimeoffset]$transitions[0].at).ToUniversalTime() } else { $null }
+    if ($transitions.Count -ne 1 -or $actualRelease -ne $expectedRelease) {
+        throw 'A transient logical-core spike did not pause release until the next idle sample.'
+    }
+    $caseResults.Add([ordered]@{ name = 'transient-logical-core-spike-pauses-release'; status = 'PASS' })
+
+    $samples = [System.Collections.Generic.List[object]]::new()
     1..149 | ForEach-Object { $samples.Add((New-Sample 48 0 45 8)) }
     $samples.Add((New-Sample 48 0 45 40))
     $samples.Add((New-Sample 48 0 45 40))
@@ -134,6 +147,17 @@ try {
         throw 'Auto released before a complete cool interval after sustained demand.'
     }
     $caseResults.Add([ordered]@{ name = 'sustained-demand-resets-release'; status = 'PASS' })
+
+    $samples = [System.Collections.Generic.List[object]]::new()
+    1..149 | ForEach-Object { $samples.Add((New-Sample 48 0 45 8 10)) }
+    $samples.Add((New-Sample 48 0 45 10 80))
+    $samples.Add((New-Sample 48 0 45 10 80))
+    1..149 | ForEach-Object { $samples.Add((New-Sample 48 0 45 8 10)) }
+    $case = Invoke-SimulationCase -Name 'sustained-logical-core-demand-resets-release' -InitialState MAX -Samples $samples
+    if (@($case.result.transitions).Count -ne 0 -or $case.status.state -ne 'MAX' -or [int]$case.status.coolSamples -ne 149) {
+        throw 'Sustained logical-core demand did not reset the cool interval.'
+    }
+    $caseResults.Add([ordered]@{ name = 'sustained-logical-core-demand-resets-release'; status = 'PASS' })
 
     $samples = [System.Collections.Generic.List[object]]::new()
     1..149 | ForEach-Object { $samples.Add((New-Sample 48 0 45 8)) }

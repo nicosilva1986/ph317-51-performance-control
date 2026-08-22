@@ -314,7 +314,8 @@ try {
                 ($gpuTemp -eq 0 -or $gpuTemp -le [double]$script:Config.releaseGpuC) -and
                 $systemTemp -le [double]$script:Config.releaseSystemC
             $releaseIdleSample = $releaseThermalEnvelope -and
-                $cpuLoad -le [double]$script:Config.releaseCpuLoadPct
+                $cpuLoad -le [double]$script:Config.releaseCpuLoadPct -and
+                -not $loadTrigger
             $releaseReset = -not $releaseThermalEnvelope -or
                 $rapidRise -or
                 $loadSamples -ge [int]$script:Config.preemptLoadSamples
@@ -358,6 +359,7 @@ try {
                 $heldSeconds = $elapsedSeconds - $maxSinceSeconds
                 if ($heldSeconds -ge [double]$script:Config.minMaxSeconds -and
                     $coolSamples -ge [int]$script:Config.releaseSamples -and
+                    $releaseIdleSample -and
                     $releaseTrendStable) {
                     Set-HardwareFanProfile -Profile 'AUTO'
                     $state = 'AUTO'
