@@ -33,7 +33,7 @@ Max redujo la máxima 12 °C, redujo el promedio 10,5 °C y mejoró el throughpu
 - **Driver hygiene:** preflight schema v3, seis scripts sellados, backups dobles, journal transaccional y rebind reversible sin `/force`. La recuperación nunca repite una eliminación ambigua. Los binarios de terceros no se publican.
 - **Evidence first:** toda afirmación de rendimiento debe enlazar una carga reproducible, datos térmicos y ausencia/presencia de WHEA.
 
-Ver [uso y pruebas](docs/usage.md), [arquitectura](docs/architecture.md), [superficie WMI](docs/wmi-surface.md), [inventario inicial](docs/hardware-and-driver-baseline.md), [plan Turbo nativo](docs/native-turbo-plan.md) y [recuperación](docs/recovery-and-rollback.md).
+Ver [uso y pruebas](docs/usage.md), [arquitectura](docs/architecture.md), [superficie WMI](docs/wmi-surface.md), [inventario inicial](docs/hardware-and-driver-baseline.md), [plan Turbo nativo](docs/native-turbo-plan.md), [recuperación](docs/recovery-and-rollback.md), [roadmap de controles siguientes](docs/roadmap-next-controls.md), [experimento Custom %](docs/fan-curve-experiment.md) y [telemetría de límites](docs/limit-telemetry-proposal.md).
 
 ## Seguridad
 
