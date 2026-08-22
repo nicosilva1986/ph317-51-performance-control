@@ -106,20 +106,44 @@ try {
     $samples = [System.Collections.Generic.List[object]]::new()
     1..149 | ForEach-Object { $samples.Add((New-Sample 48 0 45 8)) }
     $samples.Add((New-Sample 48 0 45 21))
-    1..149 | ForEach-Object { $samples.Add((New-Sample 48 0 45 8)) }
-    $case = Invoke-SimulationCase -Name 'release-envelope-violation-resets' -InitialState MAX -Samples $samples
-    if (@($case.result.transitions).Count -ne 0 -or $case.status.state -ne 'MAX' -or [int]$case.status.coolSamples -ne 149) {
-        throw 'A real release-envelope violation did not reset the cool interval.'
-    }
     $samples.Add((New-Sample 48 0 45 8))
-    $case = Invoke-SimulationCase -Name 'release-after-full-post-violation-interval' -InitialState MAX -Samples $samples
+    $case = Invoke-SimulationCase -Name 'transient-non-idle-sample-pauses-release' -InitialState MAX -Samples $samples
     $transitions = @($case.result.transitions)
-    $expectedRelease = [datetimeoffset]'2026-01-01T00:09:58Z'
+    $expectedRelease = [datetimeoffset]'2026-01-01T00:05:00Z'
     $actualRelease = if ($transitions.Count -eq 1) { ([datetimeoffset]$transitions[0].at).ToUniversalTime() } else { $null }
     if ($transitions.Count -ne 1 -or $actualRelease -ne $expectedRelease) {
-        throw 'Auto released before a complete cool interval after an envelope violation.'
+        throw 'A transient non-idle sample erased the otherwise complete cool interval.'
     }
-    $caseResults.Add([ordered]@{ name = 'release-envelope-violation-resets'; status = 'PASS' })
+    $caseResults.Add([ordered]@{ name = 'transient-non-idle-sample-pauses-release'; status = 'PASS' })
+
+    $samples = [System.Collections.Generic.List[object]]::new()
+    1..149 | ForEach-Object { $samples.Add((New-Sample 48 0 45 8)) }
+    $samples.Add((New-Sample 48 0 45 40))
+    $samples.Add((New-Sample 48 0 45 40))
+    1..149 | ForEach-Object { $samples.Add((New-Sample 48 0 45 8)) }
+    $case = Invoke-SimulationCase -Name 'sustained-demand-resets-release' -InitialState MAX -Samples $samples
+    if (@($case.result.transitions).Count -ne 0 -or $case.status.state -ne 'MAX' -or [int]$case.status.coolSamples -ne 149) {
+        throw 'Sustained CPU demand did not reset the cool interval.'
+    }
+    $samples.Add((New-Sample 48 0 45 8))
+    $case = Invoke-SimulationCase -Name 'release-after-full-post-demand-interval' -InitialState MAX -Samples $samples
+    $transitions = @($case.result.transitions)
+    $expectedRelease = [datetimeoffset]'2026-01-01T00:10:00Z'
+    $actualRelease = if ($transitions.Count -eq 1) { ([datetimeoffset]$transitions[0].at).ToUniversalTime() } else { $null }
+    if ($transitions.Count -ne 1 -or $actualRelease -ne $expectedRelease) {
+        throw 'Auto released before a complete cool interval after sustained demand.'
+    }
+    $caseResults.Add([ordered]@{ name = 'sustained-demand-resets-release'; status = 'PASS' })
+
+    $samples = [System.Collections.Generic.List[object]]::new()
+    1..149 | ForEach-Object { $samples.Add((New-Sample 48 0 45 8)) }
+    $samples.Add((New-Sample 56 0 45 8))
+    1..149 | ForEach-Object { $samples.Add((New-Sample 48 0 45 8)) }
+    $case = Invoke-SimulationCase -Name 'thermal-envelope-violation-resets-release' -InitialState MAX -Samples $samples
+    if (@($case.result.transitions).Count -ne 0 -or $case.status.state -ne 'MAX' -or [int]$case.status.coolSamples -ne 149) {
+        throw 'A thermal release-envelope violation did not reset the cool interval.'
+    }
+    $caseResults.Add([ordered]@{ name = 'thermal-envelope-violation-resets-release'; status = 'PASS' })
 
     $samples = [System.Collections.Generic.List[object]]::new()
     1..8 | ForEach-Object { $samples.Add((New-Sample 0 0 0 10)) }

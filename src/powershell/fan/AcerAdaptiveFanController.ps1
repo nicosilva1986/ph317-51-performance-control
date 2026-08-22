@@ -310,10 +310,14 @@ try {
                 $systemTemp -ge [double]$script:Config.maxSystemC -or
                 $loadSamples -ge [int]$script:Config.preemptLoadSamples -or
                 $rapidRise
-            $releaseEnvelope = $cpuTemp -le [double]$script:Config.releaseCpuC -and
+            $releaseThermalEnvelope = $cpuTemp -le [double]$script:Config.releaseCpuC -and
                 ($gpuTemp -eq 0 -or $gpuTemp -le [double]$script:Config.releaseGpuC) -and
-                $systemTemp -le [double]$script:Config.releaseSystemC -and
+                $systemTemp -le [double]$script:Config.releaseSystemC
+            $releaseIdleSample = $releaseThermalEnvelope -and
                 $cpuLoad -le [double]$script:Config.releaseCpuLoadPct
+            $releaseReset = -not $releaseThermalEnvelope -or
+                $rapidRise -or
+                $loadSamples -ge [int]$script:Config.preemptLoadSamples
 
             if ($state -eq 'AUTO') {
                 $coolSamples = 0
@@ -349,7 +353,8 @@ try {
             }
             else {
                 $hotSamples = 0
-                if ($releaseEnvelope) { $coolSamples++ } else { $coolSamples = 0 }
+                if ($releaseReset) { $coolSamples = 0 }
+                elseif ($releaseIdleSample) { $coolSamples++ }
                 $heldSeconds = $elapsedSeconds - $maxSinceSeconds
                 if ($heldSeconds -ge [double]$script:Config.minMaxSeconds -and
                     $coolSamples -ge [int]$script:Config.releaseSamples -and
