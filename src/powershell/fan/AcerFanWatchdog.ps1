@@ -101,6 +101,37 @@ function Get-IntegrityState {
     return [pscustomobject]$result
 }
 
+function Get-RequiredUnsignedInteger {
+    param(
+        [Parameter(Mandatory)] $InputObject,
+        [Parameter(Mandatory)] [string] $Name,
+        [Parameter(Mandatory)] [uint64] $Maximum
+    )
+
+    $property = $InputObject.PSObject.Properties[$Name]
+    if ($null -eq $property -or $null -eq $property.Value -or $property.Value -is [bool]) {
+        throw "Primary heartbeat has invalid unsigned integer: $Name"
+    }
+
+    $value = $property.Value
+    $typeCode = [Type]::GetTypeCode($value.GetType())
+    $signedTypes = @([TypeCode]::SByte, [TypeCode]::Int16, [TypeCode]::Int32, [TypeCode]::Int64)
+    $unsignedTypes = @([TypeCode]::Byte, [TypeCode]::UInt16, [TypeCode]::UInt32, [TypeCode]::UInt64)
+    if ($typeCode -in $signedTypes) {
+        $signedValue = [int64]$value
+        if ($signedValue -lt 0) { throw "Primary heartbeat has invalid unsigned integer: $Name" }
+        $parsed = [uint64]$signedValue
+    }
+    elseif ($typeCode -in $unsignedTypes) {
+        $parsed = [uint64]$value
+    }
+    else {
+        throw "Primary heartbeat has invalid unsigned integer: $Name"
+    }
+    if ($parsed -gt $Maximum) { throw "Primary heartbeat has out-of-range unsigned integer: $Name" }
+    return $parsed
+}
+
 function Get-PrimaryStatusHealth {
     param([Parameter(Mandatory)] $Configuration)
 
@@ -121,15 +152,16 @@ function Get-PrimaryStatusHealth {
         if ($ageSeconds -lt -$MaximumFutureSkewSeconds) { throw "Primary heartbeat is $([math]::Round(-$ageSeconds,1)) seconds in the future." }
         $state = [string]$status.state
         if ($state -notin @('AUTO', 'MAX')) { throw "Primary state is invalid: $state" }
-        $mode = ([uint32]$status.fanBehaviorBitmap -shr 8) -band 3
+        $behaviorBitmap = [uint32](Get-RequiredUnsignedInteger -InputObject $status -Name 'fanBehaviorBitmap' -Maximum ([uint32]::MaxValue))
+        $mode = ($behaviorBitmap -shr 8) -band 3
         $healthCode = [string]$status.status
         $result.status = $status
         if ($healthCode -eq 'REASSERT_PENDING') {
+            if ($state -ne 'MAX') {
+                throw 'REASSERT_PENDING is transient only while the primary state is MAX.'
+            }
             foreach ($name in @('cpuFanRpm', 'gpuFanRpm')) {
-                $rpmProperty = $status.PSObject.Properties[$name]
-                if ($null -eq $rpmProperty -or $null -eq $rpmProperty.Value -or [int]$rpmProperty.Value -lt 0) {
-                    throw "REASSERT_PENDING heartbeat has invalid $name."
-                }
+                [void](Get-RequiredUnsignedInteger -InputObject $status -Name $name -Maximum ([int32]::MaxValue))
             }
             $result.disposition = 'REASSERT_PENDING'
             $result.detail = "Primary $state transition is awaiting verified mode/RPM; observed mode $mode."
@@ -141,12 +173,11 @@ function Get-PrimaryStatusHealth {
             if ($mode -ne 1) { throw "AUTO state does not match firmware mode $mode." }
         }
         else {
-            foreach ($name in @('cpuFanRpm', 'gpuFanRpm')) {
-                if ($null -eq $status.PSObject.Properties[$name]) { throw "MAX heartbeat property is missing: $name" }
-            }
+            $cpuFanRpm = Get-RequiredUnsignedInteger -InputObject $status -Name 'cpuFanRpm' -Maximum ([int32]::MaxValue)
+            $gpuFanRpm = Get-RequiredUnsignedInteger -InputObject $status -Name 'gpuFanRpm' -Maximum ([int32]::MaxValue)
             if ($mode -ne 2) { throw "MAX state does not match firmware mode $mode." }
             $minimumRpm = [int]$Configuration.minimumMaxRpm
-            if ([int]$status.cpuFanRpm -lt $minimumRpm -or [int]$status.gpuFanRpm -lt $minimumRpm) {
+            if ($cpuFanRpm -lt $minimumRpm -or $gpuFanRpm -lt $minimumRpm) {
                 throw "MAX fan RPM is below $minimumRpm."
             }
         }
@@ -219,11 +250,8 @@ function Register-TrustedPrimaryTask {
     Register-ScheduledTask -TaskName $PrimaryTaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description 'Authoritative adaptive Acer PH317-51 fan control.' -Force | Out-Null
 }
 
-function Invoke-EmergencyRecovery {
+function Restart-TrustedPrimaryTask {
     param([string] $Reason)
-    $maxError = ''
-    try { Set-EmergencyMax } catch { $maxError = $_.Exception.Message }
-
     $task = $null
     try { $task = Get-ScheduledTask -TaskName $PrimaryTaskName -ErrorAction SilentlyContinue } catch { }
     try {
@@ -235,10 +263,45 @@ function Invoke-EmergencyRecovery {
     }
     catch {
         $restartError = $_.Exception.Message
-        Write-WatchdogEvent 'primary_recovery_error' "$Reason; MAX error: $maxError; restart error: $restartError"
+        Write-WatchdogEvent 'primary_recovery_error' "$Reason; restart error: $restartError"
         return
     }
-    Write-WatchdogEvent 'primary_restarted' "$Reason; MAX error: $maxError"
+    Write-WatchdogEvent 'primary_restarted' $Reason
+}
+
+function Invoke-WatchdogRecoveryAction {
+    param(
+        [Parameter(Mandatory)]
+        [ValidateSet('NONE', 'MAX_ONLY', 'MAX_AND_RESTART')]
+        [string] $Action,
+        [Parameter(Mandatory)] [string] $Reason,
+        [Parameter(Mandatory)] [scriptblock] $RequestMax,
+        [Parameter(Mandatory)] [scriptblock] $RestartPrimary
+    )
+
+    if ($Action -eq 'NONE') {
+        return [pscustomobject]@{ outcome = 'NONE'; resetPending = $false }
+    }
+
+    $maxError = ''
+    try {
+        & $RequestMax | Out-Null
+        if ($Action -eq 'MAX_ONLY') {
+            return [pscustomobject]@{ outcome = 'MAX_REQUESTED'; resetPending = $false }
+        }
+    }
+    catch {
+        $maxError = $_.Exception.Message
+    }
+
+    & $RestartPrimary "$Reason; MAX error: $maxError" | Out-Null
+    return [pscustomobject]@{ outcome = 'PRIMARY_RESTARTED'; resetPending = $true }
+}
+
+function Invoke-EmergencyRecovery {
+    param([string] $Reason)
+    [void](Invoke-WatchdogRecoveryAction -Action 'MAX_AND_RESTART' -Reason $Reason `
+        -RequestMax { Set-EmergencyMax } -RestartPrimary { param($restartReason) Restart-TrustedPrimaryTask -Reason $restartReason })
 }
 
 $integrityState = Get-IntegrityState
@@ -307,21 +370,22 @@ try {
                         -PendingElapsedSeconds $pendingElapsed -VerifyMaxAfterSeconds ([int]$integrityState.config.verifyMaxAfterSeconds)
                     $pendingCount = [int]$decision.nextPendingCount
                     if ($decision.action -eq 'MAX_ONLY') {
-                        try {
-                            Set-EmergencyMax
+                        $dispatch = Invoke-WatchdogRecoveryAction -Action $decision.action -Reason 'REASSERT_PENDING MAX request failed.' `
+                            -RequestMax { Set-EmergencyMax } -RestartPrimary { param($restartReason) Restart-TrustedPrimaryTask -Reason $restartReason }
+                        if (-not $dispatch.resetPending) {
                             Write-WatchdogEvent 'reassert_pending_max_requested' "count=$pendingCount; elapsedSeconds=$([math]::Round($pendingElapsed,1)); verifySeconds=$([int]$integrityState.config.verifyMaxAfterSeconds)"
                         }
-                        catch {
+                        else {
                             $pendingCount = 0
                             $pendingClock.Reset()
-                            Invoke-EmergencyRecovery -Reason "REASSERT_PENDING MAX request failed: $($_.Exception.Message)"
                         }
                     }
                     else {
                         Write-WatchdogEvent 'reassert_pending_restart_threshold' "count=$pendingCount; elapsedSeconds=$([math]::Round($pendingElapsed,1)); verifySeconds=$([int]$integrityState.config.verifyMaxAfterSeconds)"
                         $pendingCount = 0
                         $pendingClock.Reset()
-                        Invoke-EmergencyRecovery -Reason "Persistent heartbeat: $($health.detail)"
+                        [void](Invoke-WatchdogRecoveryAction -Action $decision.action -Reason "Persistent heartbeat: $($health.detail)" `
+                            -RequestMax { Set-EmergencyMax } -RestartPrimary { param($restartReason) Restart-TrustedPrimaryTask -Reason $restartReason })
                     }
                 }
                 elseif ($health.disposition -eq 'HEALTHY_VERIFIED') {

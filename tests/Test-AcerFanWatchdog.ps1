@@ -35,6 +35,11 @@ function Write-Heartbeat {
     } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $testRoot 'adaptive-fan-status.json') -Encoding utf8
 }
 
+function Write-HeartbeatObject {
+    param([Parameter(Mandatory)] $Heartbeat)
+    $Heartbeat | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $testRoot 'adaptive-fan-status.json') -Encoding utf8
+}
+
 function Invoke-Probe {
     param([int] $PreviousPendingCount = 0, [double] $PendingElapsedSeconds = 0)
     $raw = & $engine -NoLogo -NoProfile -NonInteractive -File $watchdog -Root $testRoot -ProbeOnly `
@@ -45,6 +50,55 @@ function Invoke-Probe {
 
 $cases = [System.Collections.Generic.List[object]]::new()
 try {
+    $tokens = $null
+    $parseErrors = $null
+    $watchdogAst = [Management.Automation.Language.Parser]::ParseFile($watchdog, [ref]$tokens, [ref]$parseErrors)
+    if (@($parseErrors).Count -ne 0) { throw "Watchdog parser errors: $($parseErrors -join '; ')" }
+    $dispatchAst = $watchdogAst.Find({
+        param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Invoke-WatchdogRecoveryAction'
+    }, $true)
+    if ($null -eq $dispatchAst) { throw 'The production watchdog dispatch function is missing.' }
+    Invoke-Expression $dispatchAst.Extent.Text
+
+    $dispatchTrace = [Collections.Generic.List[string]]::new()
+    $dispatch = Invoke-WatchdogRecoveryAction -Action MAX_ONLY -Reason 'test first pending' `
+        -RequestMax { [void]$dispatchTrace.Add('MAX') } -RestartPrimary { param($reason) [void]$dispatchTrace.Add('RESTART') }
+    if (($dispatchTrace -join ',') -ne 'MAX' -or $dispatch.outcome -ne 'MAX_REQUESTED' -or $dispatch.resetPending) {
+        throw 'First pending dispatch did not request MAX exactly once without restart.'
+    }
+    $cases.Add([ordered]@{ name = 'first-pending-dispatches-max-only'; status = 'PASS' })
+
+    $dispatchTrace.Clear()
+    $dispatch = Invoke-WatchdogRecoveryAction -Action MAX_ONLY -Reason 'test MAX failure' `
+        -RequestMax { [void]$dispatchTrace.Add('MAX'); throw 'simulated MAX failure' } `
+        -RestartPrimary { param($reason) [void]$dispatchTrace.Add('RESTART') }
+    if (($dispatchTrace -join ',') -ne 'MAX,RESTART' -or $dispatch.outcome -ne 'PRIMARY_RESTARTED' -or -not $dispatch.resetPending) {
+        throw 'MAX request failure did not immediately dispatch primary restart.'
+    }
+    $cases.Add([ordered]@{ name = 'max-request-failure-dispatches-restart'; status = 'PASS' })
+
+    $dispatchTrace.Clear()
+    $dispatch = Invoke-WatchdogRecoveryAction -Action MAX_AND_RESTART -Reason 'test threshold' `
+        -RequestMax { [void]$dispatchTrace.Add('MAX') } -RestartPrimary { param($reason) [void]$dispatchTrace.Add('RESTART') }
+    if (($dispatchTrace -join ',') -ne 'MAX,RESTART' -or $dispatch.outcome -ne 'PRIMARY_RESTARTED' -or -not $dispatch.resetPending) {
+        throw 'Restart threshold did not request MAX before primary restart.'
+    }
+    $cases.Add([ordered]@{ name = 'restart-threshold-dispatches-max-before-restart'; status = 'PASS' })
+
+    $continueAsts = @($watchdogAst.FindAll({ param($node) $node -is [Management.Automation.Language.ContinueStatementAst] }, $true))
+    $integrityFailureIf = $watchdogAst.Find({
+        param($node)
+        $node -is [Management.Automation.Language.IfStatementAst] -and $node.Extent.Text -match 'integrity_failure_max_left_active'
+    }, $true)
+    if ($continueAsts.Count -ne 1 -or $null -eq $integrityFailureIf -or
+        $continueAsts[0].Extent.StartLineNumber -lt $integrityFailureIf.Extent.StartLineNumber -or
+        $continueAsts[0].Extent.EndLineNumber -gt $integrityFailureIf.Extent.EndLineNumber -or
+        $watchdogAst.Extent.Text -notmatch 'Start-Sleep\s+-Seconds\s+\$watchdogPollSeconds') {
+        throw 'A normal recovery path can bypass the watchdog poll sleep.'
+    }
+    $cases.Add([ordered]@{ name = 'normal-recovery-paths-retain-poll-sleep'; status = 'PASS' })
+
     Restore-Fixture
     Write-Heartbeat -State MAX -Health HEALTHY_VERIFIED -Behavior 512 -CpuRpm 6122 -GpuRpm 6122
     $probe = Invoke-Probe
@@ -94,11 +148,28 @@ try {
 
     Write-Heartbeat -State AUTO -Health REASSERT_PENDING -Behavior 512 -CpuRpm 6122 -GpuRpm 6122
     $probe = Invoke-Probe
-    if ($probe.exitCode -eq 0 -or $probe.result.health.disposition -ne 'REASSERT_PENDING' -or
-        $probe.result.decision.action -ne 'MAX_ONLY') {
-        throw 'AUTO REASSERT_PENDING was not kept safe with MAX while restart was debounced.'
+    if ($probe.exitCode -eq 0 -or $probe.result.health.disposition -ne 'FATAL' -or
+        $probe.result.decision.action -ne 'MAX_AND_RESTART') {
+        throw 'AUTO REASSERT_PENDING did not force immediate single-writer recovery.'
     }
-    $cases.Add([ordered]@{ name = 'auto-reassert-pending-defers-restart'; status = 'PASS' })
+    $cases.Add([ordered]@{ name = 'auto-reassert-pending-restarts-immediately'; status = 'PASS' })
+
+    foreach ($invalidBitmap in @($null, $true, '')) {
+        Write-HeartbeatObject -Heartbeat ([ordered]@{
+            updatedAt = ([datetimeoffset]::Now).ToString('o')
+            state = 'MAX'
+            status = 'REASSERT_PENDING'
+            fanBehaviorBitmap = $invalidBitmap
+            cpuFanRpm = 1200
+            gpuFanRpm = 1100
+        })
+        $probe = Invoke-Probe
+        if ($probe.exitCode -eq 0 -or $probe.result.health.disposition -ne 'FATAL' -or
+            $probe.result.decision.action -ne 'MAX_AND_RESTART' -or [string]$probe.result.health.detail -notmatch 'unsigned integer') {
+            throw "Invalid fanBehaviorBitmap '$invalidBitmap' did not fail closed."
+        }
+    }
+    $cases.Add([ordered]@{ name = 'null-bool-empty-bitmap-fails-closed'; status = 'PASS' })
 
     Write-Heartbeat -State MAX -Health DEGRADED_FAIL_SAFE -Behavior 512 -CpuRpm 6122 -GpuRpm 6122
     $probe = Invoke-Probe
