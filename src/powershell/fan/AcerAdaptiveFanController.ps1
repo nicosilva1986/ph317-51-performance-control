@@ -298,6 +298,9 @@ try {
             $rapidRise = ($cpuTemp -ge [double]$script:Config.preemptTemperatureC -and $cpuRise -ge [double]$script:Config.riseTriggerC) -or
                 ($gpuTemp -ge [double]$script:Config.preemptTemperatureC -and $gpuRise -ge [double]$script:Config.riseTriggerC) -or
                 ($systemTemp -ge [double]$script:Config.preemptTemperatureC -and $systemRise -ge [double]$script:Config.riseTriggerC)
+            $releaseTrendStable = $cpuRise -le [double]$script:Config.releaseRiseToleranceC -and
+                $gpuRise -le [double]$script:Config.releaseRiseToleranceC -and
+                $systemRise -le [double]$script:Config.releaseRiseToleranceC
 
             $critical = $cpuTemp -ge [double]$script:Config.criticalCpuC -or
                 $gpuTemp -ge [double]$script:Config.criticalGpuC -or
@@ -307,12 +310,9 @@ try {
                 $systemTemp -ge [double]$script:Config.maxSystemC -or
                 $loadSamples -ge [int]$script:Config.preemptLoadSamples -or
                 $rapidRise
-            $cool = $cpuTemp -le [double]$script:Config.releaseCpuC -and
+            $releaseEnvelope = $cpuTemp -le [double]$script:Config.releaseCpuC -and
                 ($gpuTemp -eq 0 -or $gpuTemp -le [double]$script:Config.releaseGpuC) -and
                 $systemTemp -le [double]$script:Config.releaseSystemC -and
-                $cpuRise -le [double]$script:Config.releaseRiseToleranceC -and
-                $gpuRise -le [double]$script:Config.releaseRiseToleranceC -and
-                $systemRise -le [double]$script:Config.releaseRiseToleranceC -and
                 $cpuLoad -le [double]$script:Config.releaseCpuLoadPct
 
             if ($state -eq 'AUTO') {
@@ -349,9 +349,11 @@ try {
             }
             else {
                 $hotSamples = 0
-                if ($cool) { $coolSamples++ } else { $coolSamples = 0 }
+                if ($releaseEnvelope) { $coolSamples++ } else { $coolSamples = 0 }
                 $heldSeconds = $elapsedSeconds - $maxSinceSeconds
-                if ($heldSeconds -ge [double]$script:Config.minMaxSeconds -and $coolSamples -ge [int]$script:Config.releaseSamples) {
+                if ($heldSeconds -ge [double]$script:Config.minMaxSeconds -and
+                    $coolSamples -ge [int]$script:Config.releaseSamples -and
+                    $releaseTrendStable) {
                     Set-HardwareFanProfile -Profile 'AUTO'
                     $state = 'AUTO'
                     $transition = [ordered]@{ at = $now.ToString('o'); from = 'MAX'; to = 'AUTO'; reason = 'sustained_cool_idle' }

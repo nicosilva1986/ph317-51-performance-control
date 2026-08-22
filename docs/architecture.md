@@ -24,7 +24,7 @@ Current performance-first candidate:
 - immediate `MAX` at CPU/GPU ≥75 °C or system ≥70 °C;
 - fail-safe `MAX` after 3 invalid samples;
 - minimum `MAX` residence: 5 minutes;
-- return to `AUTO` only after 5 minutes simultaneously below CPU 55 °C, GPU 50 °C (or absent), system 50 °C, total CPU 20 %, and stable trend;
+- return to `AUTO` only after 5 minutes continuously inside the CPU 55 °C, GPU 50 °C (or absent), system 50 °C and total CPU 20 % release envelope, with a stable trend at the transition instant; safe in-envelope sensor quantization delays that instant but does not erase the accumulated cool interval;
 - reassert after two consecutive mode/RPM mismatches.
 
 The reference firmware returns compact behavior values `256` for Auto and `512` for Max. The controller decodes CPU mode as `(raw >> 8) & 3` and also requires both fans ≥5000 RPM before declaring Max verified.

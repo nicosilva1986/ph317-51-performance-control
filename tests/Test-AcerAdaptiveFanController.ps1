@@ -3,6 +3,8 @@ $root = Split-Path -Parent $PSCommandPath
 $fanRoot = [IO.Path]::GetFullPath((Join-Path $root '..\src\powershell\fan'))
 $controller = Join-Path $fanRoot 'AcerAdaptiveFanController.ps1'
 $config = Join-Path $fanRoot 'fan-controller-config.json'
+$engineName = if ($PSVersionTable.PSEdition -eq 'Core') { 'pwsh.exe' } else { 'powershell.exe' }
+$engine = Join-Path $PSHOME $engineName
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) ('AcerAdaptiveFanTests-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $testRoot | Out-Null
 
@@ -21,7 +23,7 @@ function Invoke-SimulationCase {
     $logPath = Join-Path $caseRoot 'events.jsonl'
     $statusPath = Join-Path $caseRoot 'status.json'
     [ordered]@{ initialState = $InitialState; samples = $Samples } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $simulationPath -Encoding utf8
-    $raw = & (Join-Path $PSHOME 'pwsh.exe') -NoLogo -NoProfile -NonInteractive -File $controller -ConfigPath $config -SimulationPath $simulationPath -LogPath $logPath -StatusPath $statusPath
+    $raw = & $engine -NoLogo -NoProfile -NonInteractive -File $controller -ConfigPath $config -SimulationPath $simulationPath -LogPath $logPath -StatusPath $statusPath
     if ($LASTEXITCODE -ne 0) { throw "Simulation $Name exited $LASTEXITCODE." }
     return [pscustomobject]@{
         result = ($raw | ConvertFrom-Json)
@@ -70,6 +72,54 @@ try {
     if ($transitions[0].to -ne 'MAX' -or $transitions[1].to -ne 'AUTO' -or $transitions[2].reason -ne 'sensor_fail_safe') { throw 'Hysteresis/fail-safe transition sequence failed.' }
     if ($case.status.state -ne 'MAX' -or $case.status.status -ne 'DEGRADED_FAIL_SAFE') { throw 'Sensor fail-safe status is incorrect.' }
     $caseResults.Add([ordered]@{ name = 'hysteresis-and-sensor-failure'; status = 'PASS' })
+
+    $samples = [System.Collections.Generic.List[object]]::new()
+    1..40 | ForEach-Object {
+        $samples.Add((New-Sample 48 0 45 8))
+        $samples.Add((New-Sample 48 0 45 8))
+        $samples.Add((New-Sample 48 0 45 8))
+        $samples.Add((New-Sample 52 0 45 8))
+    }
+    $case = Invoke-SimulationCase -Name 'safe-jitter-eventually-releases' -InitialState MAX -Samples $samples
+    $transitions = @($case.result.transitions)
+    $expectedRelease = [datetimeoffset]'2026-01-01T00:05:00Z'
+    $actualRelease = if ($transitions.Count -eq 1) { ([datetimeoffset]$transitions[0].at).ToUniversalTime() } else { $null }
+    if ($transitions.Count -ne 1 -or $transitions[0].from -ne 'MAX' -or $transitions[0].to -ne 'AUTO' -or
+        $actualRelease -ne $expectedRelease) {
+        throw 'Normal sensor quantization while safely cool prevented release to Auto.'
+    }
+    $caseResults.Add([ordered]@{ name = 'safe-jitter-eventually-releases'; status = 'PASS' })
+
+    $samples = [System.Collections.Generic.List[object]]::new()
+    1..150 | ForEach-Object { $samples.Add((New-Sample 48 0 45 8)) }
+    $samples.Add((New-Sample 52 0 45 8))
+    $samples.Add((New-Sample 48 0 45 8))
+    $case = Invoke-SimulationCase -Name 'trend-gates-release-instant' -InitialState MAX -Samples $samples
+    $transitions = @($case.result.transitions)
+    $expectedRelease = [datetimeoffset]'2026-01-01T00:05:02Z'
+    $actualRelease = if ($transitions.Count -eq 1) { ([datetimeoffset]$transitions[0].at).ToUniversalTime() } else { $null }
+    if ($transitions.Count -ne 1 -or $actualRelease -ne $expectedRelease) {
+        throw 'Release trend did not defer Auto until the first stable sample.'
+    }
+    $caseResults.Add([ordered]@{ name = 'trend-gates-release-instant'; status = 'PASS' })
+
+    $samples = [System.Collections.Generic.List[object]]::new()
+    1..149 | ForEach-Object { $samples.Add((New-Sample 48 0 45 8)) }
+    $samples.Add((New-Sample 48 0 45 21))
+    1..149 | ForEach-Object { $samples.Add((New-Sample 48 0 45 8)) }
+    $case = Invoke-SimulationCase -Name 'release-envelope-violation-resets' -InitialState MAX -Samples $samples
+    if (@($case.result.transitions).Count -ne 0 -or $case.status.state -ne 'MAX' -or [int]$case.status.coolSamples -ne 149) {
+        throw 'A real release-envelope violation did not reset the cool interval.'
+    }
+    $samples.Add((New-Sample 48 0 45 8))
+    $case = Invoke-SimulationCase -Name 'release-after-full-post-violation-interval' -InitialState MAX -Samples $samples
+    $transitions = @($case.result.transitions)
+    $expectedRelease = [datetimeoffset]'2026-01-01T00:09:58Z'
+    $actualRelease = if ($transitions.Count -eq 1) { ([datetimeoffset]$transitions[0].at).ToUniversalTime() } else { $null }
+    if ($transitions.Count -ne 1 -or $actualRelease -ne $expectedRelease) {
+        throw 'Auto released before a complete cool interval after an envelope violation.'
+    }
+    $caseResults.Add([ordered]@{ name = 'release-envelope-violation-resets'; status = 'PASS' })
 
     $samples = [System.Collections.Generic.List[object]]::new()
     1..8 | ForEach-Object { $samples.Add((New-Sample 0 0 0 10)) }
