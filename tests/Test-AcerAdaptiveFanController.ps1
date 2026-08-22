@@ -9,20 +9,34 @@ $testRoot = Join-Path ([IO.Path]::GetTempPath()) ('AcerAdaptiveFanTests-' + [gui
 New-Item -ItemType Directory -Path $testRoot | Out-Null
 
 function New-Sample {
-    param([int] $Cpu, [int] $Gpu, [int] $System, [int] $Load, [int] $MaxLogical = -1)
+    param(
+        [int] $Cpu,
+        [int] $Gpu,
+        [int] $System,
+        [int] $Load,
+        [int] $MaxLogical = -1,
+        [int] $Behavior = -1,
+        [int] $CpuFanRpm = -1,
+        [int] $GpuFanRpm = -1
+    )
     $sample = [ordered]@{ cpuTempC = $Cpu; gpuTempC = $Gpu; systemTempC = $System; cpuLoadPct = $Load }
     if ($MaxLogical -ge 0) { $sample.cpuMaxLogicalLoadPct = $MaxLogical }
+    if ($Behavior -ge 0) { $sample.fanBehaviorBitmap = [uint32]$Behavior }
+    if ($CpuFanRpm -ge 0) { $sample.cpuFanRpm = $CpuFanRpm }
+    if ($GpuFanRpm -ge 0) { $sample.gpuFanRpm = $GpuFanRpm }
     return $sample
 }
 
 function Invoke-SimulationCase {
-    param([string] $Name, [string] $InitialState, [object[]] $Samples)
+    param([string] $Name, [string] $InitialState, [object[]] $Samples, [object[]] $AutoWriteReadbacks = @())
     $caseRoot = Join-Path $testRoot $Name
     New-Item -ItemType Directory -Path $caseRoot | Out-Null
     $simulationPath = Join-Path $caseRoot 'simulation.json'
     $logPath = Join-Path $caseRoot 'events.jsonl'
     $statusPath = Join-Path $caseRoot 'status.json'
-    [ordered]@{ initialState = $InitialState; samples = $Samples } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $simulationPath -Encoding utf8
+    $simulation = [ordered]@{ initialState = $InitialState; samples = $Samples }
+    if (@($AutoWriteReadbacks).Count -gt 0) { $simulation.autoWriteReadbacks = @($AutoWriteReadbacks) }
+    $simulation | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $simulationPath -Encoding utf8
     $raw = & $engine -NoLogo -NoProfile -NonInteractive -File $controller -ConfigPath $config -SimulationPath $simulationPath -LogPath $logPath -StatusPath $statusPath
     if ($LASTEXITCODE -ne 0) { throw "Simulation $Name exited $LASTEXITCODE." }
     return [pscustomobject]@{
@@ -105,6 +119,52 @@ try {
         throw 'Normal sensor quantization while safely cool prevented release to Auto.'
     }
     $caseResults.Add([ordered]@{ name = 'safe-jitter-eventually-releases'; status = 'PASS' })
+
+    $samples = [System.Collections.Generic.List[object]]::new()
+    1..151 | ForEach-Object { $samples.Add((New-Sample 48 0 45 8 10 512 6122 6122)) }
+    $staleReadback = New-Sample 48 0 45 8 10 512 6122 6122
+    $autoReadback = New-Sample 48 0 45 8 10 256 2500 2500
+    $case = Invoke-SimulationCase -Name 'auto-transition-publishes-post-write-readback' -InitialState MAX -Samples $samples -AutoWriteReadbacks @($staleReadback, $autoReadback)
+    if (@($case.result.transitions).Count -ne 1 -or $case.status.state -ne 'AUTO' -or
+        [uint32]$case.status.fanBehaviorBitmap -ne 256) {
+        throw 'AUTO transition published the stale pre-write MAX firmware sample.'
+    }
+    $caseResults.Add([ordered]@{ name = 'auto-transition-publishes-post-write-readback'; status = 'PASS' })
+
+    $samples = [System.Collections.Generic.List[object]]::new()
+    1..151 | ForEach-Object { $samples.Add((New-Sample 48 0 45 8 10 512 6122 6122)) }
+    $staleReadbacks = 1..5 | ForEach-Object { New-Sample 48 0 45 8 10 512 6122 6122 }
+    $case = Invoke-SimulationCase -Name 'auto-readback-failure-remains-max' -InitialState MAX -Samples $samples -AutoWriteReadbacks $staleReadbacks
+    if (@($case.result.transitions).Count -ne 0 -or $case.result.finalState -ne 'MAX' -or
+        $case.status.state -ne 'MAX' -or $case.status.status -ne 'DEGRADED_FAIL_SAFE' -or
+        [string]$case.status.lastError -notlike 'AUTO firmware readback verification failed.*MAX fallback requested.*') {
+        throw 'Unverified AUTO did not fail closed in MAX with an actionable degraded status.'
+    }
+    $caseResults.Add([ordered]@{ name = 'auto-readback-failure-remains-max'; status = 'PASS' })
+
+    1..59 | ForEach-Object { $samples.Add((New-Sample 48 0 45 8 10 512 6122 6122)) }
+    $case = Invoke-SimulationCase -Name 'auto-readback-failure-rearms-hysteresis' -InitialState MAX -Samples $samples -AutoWriteReadbacks $staleReadbacks
+    $verificationErrors = @($case.events | Where-Object {
+        $_.event -eq 'sensor_or_control_error' -and [string]$_.message -like 'AUTO firmware readback verification failed.*'
+    })
+    if ($verificationErrors.Count -ne 1 -or $case.result.finalState -ne 'MAX' -or
+        $case.status.state -ne 'MAX' -or [int]$case.status.coolSamples -ne 59 -or
+        @($case.result.transitions).Count -ne 0) {
+        throw 'Failed AUTO verification was retried without a new residence and cool-idle qualification interval.'
+    }
+    $caseResults.Add([ordered]@{ name = 'auto-readback-failure-rearms-hysteresis'; status = 'PASS' })
+
+    $samples.Add((New-Sample 48 0 45 8 10 512 6122 6122))
+    $case = Invoke-SimulationCase -Name 'exhausted-auto-readbacks-stay-fail-closed' -InitialState MAX -Samples $samples -AutoWriteReadbacks $staleReadbacks
+    $verificationErrors = @($case.events | Where-Object {
+        $_.event -eq 'sensor_or_control_error' -and [string]$_.message -like 'AUTO firmware readback verification failed.*'
+    })
+    if ($verificationErrors.Count -ne 2 -or $case.result.finalState -ne 'MAX' -or
+        $case.status.state -ne 'MAX' -or $case.status.status -ne 'DEGRADED_FAIL_SAFE' -or
+        @($case.result.transitions).Count -ne 0) {
+        throw 'Exhausted simulated AUTO readbacks silently bypassed verification or left fail-safe MAX.'
+    }
+    $caseResults.Add([ordered]@{ name = 'exhausted-auto-readbacks-stay-fail-closed'; status = 'PASS' })
 
     $samples = [System.Collections.Generic.List[object]]::new()
     1..150 | ForEach-Object { $samples.Add((New-Sample 48 0 45 8)) }

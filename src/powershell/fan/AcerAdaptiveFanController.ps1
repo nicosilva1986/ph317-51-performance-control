@@ -133,6 +133,43 @@ function Get-OptionalSampleValue {
     return $property.Value
 }
 
+function Set-VerifiedAutoProfile {
+    Set-HardwareFanProfile -Profile 'AUTO'
+
+    $simulationReadbackEnabled = $null -eq $script:Gaming -and
+        [bool]$script:SimulationAutoReadbackMode
+    if ($null -eq $script:Gaming -and -not $simulationReadbackEnabled) { return $null }
+
+    $observed = $null
+    $lastDetail = 'No readback was obtained.'
+    foreach ($attempt in 1..5) {
+        if ($null -ne $script:Gaming -and $attempt -gt 1) { Start-Sleep -Milliseconds 250 }
+        try {
+            if ($null -eq $script:Gaming) {
+                if ($script:SimulationAutoReadbacks.Count -eq 0) { throw 'Simulated AUTO readback queue was exhausted.' }
+                $observed = $script:SimulationAutoReadbacks.Dequeue()
+            }
+            else {
+                $observed = Read-HardwareSample
+            }
+            if (-not (Test-SampleValidity $observed)) { throw 'One or more readback sensor values are outside the accepted range.' }
+            $behaviorValue = Get-OptionalSampleValue $observed 'fanBehaviorBitmap'
+            if ($null -eq $behaviorValue) { throw 'AUTO readback omitted fanBehaviorBitmap.' }
+            $mode = ([uint32]$behaviorValue -shr 8) -band 3
+            if ($mode -eq 1) { return $observed }
+            $lastDetail = "Observed firmware mode $mode on attempt $attempt."
+        }
+        catch {
+            $lastDetail = $_.Exception.Message
+        }
+    }
+
+    $fallbackDetail = 'MAX fallback requested.'
+    try { Set-HardwareFanProfile -Profile 'MAX' }
+    catch { $fallbackDetail = "MAX fallback failed: $($_.Exception.Message)" }
+    throw "AUTO firmware readback verification failed. $lastDetail $fallbackDetail"
+}
+
 function Assert-ControllerConfiguration {
     param([Parameter(Mandatory)] $Configuration)
 
@@ -206,10 +243,18 @@ if (-not (Test-Path -LiteralPath $outputDirectory)) { New-Item -ItemType Directo
 
 $simulation = $null
 $script:Gaming = $null
+$script:SimulationAutoReadbacks = $null
+$script:SimulationAutoReadbackMode = $false
 $mutex = $null
 if ($SimulationPath) {
     $simulation = Get-Content -LiteralPath $SimulationPath -Raw | ConvertFrom-Json
     if ($simulation.initialState) { $InitialState = [string]$simulation.initialState }
+    $script:SimulationAutoReadbacks = [System.Collections.Generic.Queue[object]]::new()
+    $autoReadbacksProperty = $simulation.PSObject.Properties['autoWriteReadbacks']
+    if ($null -ne $autoReadbacksProperty) {
+        $script:SimulationAutoReadbackMode = $true
+        foreach ($readback in @($autoReadbacksProperty.Value)) { $script:SimulationAutoReadbacks.Enqueue($readback) }
+    }
 }
 else {
     if (-not (Test-IsAdministrator)) { throw 'AcerAdaptiveFanController must run elevated.' }
@@ -344,7 +389,24 @@ try {
                     if ($null -ne $cpuFanMode -and $cpuFanMode -ne 1) { $rpmMismatchSamples++ } else { $rpmMismatchSamples = 0 }
                     if ($rpmMismatchSamples -ge [int]$script:Config.rpmMismatchSamples -and
                         ($elapsedSeconds - $lastMaxWriteSeconds) -ge [double]$script:Config.rpmReassertMinIntervalSeconds) {
-                        Set-HardwareFanProfile -Profile 'AUTO'
+                        try {
+                            $verifiedAutoSample = Set-VerifiedAutoProfile
+                            if ($null -ne $verifiedAutoSample) { $sample = $verifiedAutoSample }
+                        }
+                        catch {
+                            $state = 'MAX'
+                            $maxSince = $now
+                            $maxSinceSeconds = $elapsedSeconds
+                            $lastMaxWrite = $now
+                            $lastMaxWriteSeconds = $elapsedSeconds
+                            $maxVerificationPending = $true
+                            $coolSamples = 0
+                            $rpmMismatchSamples = 0
+                            $transition = [ordered]@{ at = $now.ToString('o'); from = 'AUTO'; to = 'MAX'; reason = 'auto_readback_fail_safe' }
+                            $transitionHistory.Add($transition)
+                            Write-ControllerEvent -Event 'profile_changed' -Data $transition
+                            throw
+                        }
                         Write-ControllerEvent -Event 'external_override_corrected' -Data @{ desiredState = 'AUTO'; fanBehaviorBitmap = $behaviorValue; mismatchSamples = $rpmMismatchSamples }
                         $lastMaxWrite = $now
                         $lastMaxWriteSeconds = $elapsedSeconds
@@ -361,7 +423,18 @@ try {
                     $coolSamples -ge [int]$script:Config.releaseSamples -and
                     $releaseIdleSample -and
                     $releaseTrendStable) {
-                    Set-HardwareFanProfile -Profile 'AUTO'
+                    try {
+                        $verifiedAutoSample = Set-VerifiedAutoProfile
+                        if ($null -ne $verifiedAutoSample) { $sample = $verifiedAutoSample }
+                    }
+                    catch {
+                        $lastMaxWrite = $now
+                        $lastMaxWriteSeconds = $elapsedSeconds
+                        $maxVerificationPending = $true
+                        $coolSamples = 0
+                        $rpmMismatchSamples = 0
+                        throw
+                    }
                     $state = 'AUTO'
                     $transition = [ordered]@{ at = $now.ToString('o'); from = 'MAX'; to = 'AUTO'; reason = 'sustained_cool_idle' }
                     $transitionHistory.Add($transition)
@@ -400,14 +473,16 @@ try {
                 }
             }
 
+            $statusCpuMaxLogicalLoad = Get-OptionalSampleValue $sample 'cpuMaxLogicalLoadPct'
+            if ($null -eq $statusCpuMaxLogicalLoad) { $statusCpuMaxLogicalLoad = $sample.cpuLoadPct }
             $status = [ordered]@{
                 updatedAt = $now.ToString('o')
                 state = $state
-                cpuTempC = [int]$cpuTemp
-                gpuTempC = [int]$gpuTemp
-                systemTempC = [int]$systemTemp
-                cpuLoadPct = [int]$cpuLoad
-                cpuMaxLogicalLoadPct = [int]$cpuMaxLogicalLoad
+                cpuTempC = [int]$sample.cpuTempC
+                gpuTempC = [int]$sample.gpuTempC
+                systemTempC = [int]$sample.systemTempC
+                cpuLoadPct = [int]$sample.cpuLoadPct
+                cpuMaxLogicalLoadPct = [int]$statusCpuMaxLogicalLoad
                 cpuFanRpm = if ($null -ne (Get-OptionalSampleValue $sample 'cpuFanRpm')) { [int](Get-OptionalSampleValue $sample 'cpuFanRpm') } else { $null }
                 gpuFanRpm = if ($null -ne (Get-OptionalSampleValue $sample 'gpuFanRpm')) { [int](Get-OptionalSampleValue $sample 'gpuFanRpm') } else { $null }
                 fanBehaviorBitmap = if ($null -ne (Get-OptionalSampleValue $sample 'fanBehaviorBitmap')) { [uint32](Get-OptionalSampleValue $sample 'fanBehaviorBitmap') } else { $null }

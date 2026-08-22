@@ -25,6 +25,7 @@ Current performance-first candidate:
 - fail-safe `MAX` after 3 invalid samples;
 - minimum `MAX` residence: 5 minutes;
 - return to `AUTO` only after the 5-minute minimum `MAX` residence and 2 minutes of qualifying idle samples inside the CPU 55 °C, GPU 50 °C (or absent), system 50 °C and total CPU 20 % release envelope, with a stable trend at the transition instant; a transient non-idle sample pauses accumulation, while sustained demand, rapid thermal rise, or leaving the thermal envelope resets it;
+- verify every `AUTO` write with a bounded post-write firmware readback before publishing the new state; stale or invalid readback requests `MAX` and reports a degraded fail-safe state;
 - reassert after two consecutive mode/RPM mismatches.
 
 The reference firmware returns compact behavior values `256` for Auto and `512` for Max. The controller decodes CPU mode as `(raw >> 8) & 3` and also requires both fans ≥5000 RPM before declaring Max verified.
