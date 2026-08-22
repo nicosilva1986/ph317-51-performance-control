@@ -183,6 +183,18 @@ jobs:
         shell: powershell
         run: .\tests\Test-ExportSanitizedBaseline.ps1
 
+      - name: Limit telemetry tests — PowerShell 7
+        shell: pwsh
+        run: .\tests\Test-InvokeLimitTelemetry.ps1
+
+      - name: Limit telemetry tests — Windows PowerShell 5.1
+        shell: powershell
+        run: .\tests\Test-InvokeLimitTelemetry.ps1
+
+      - name: Limit telemetry forbidden-command AST gate
+        shell: pwsh
+        run: .\tests\Test-LimitTelemetryForbiddenCommands.ps1
+
       - name: Validate pinned release hashes
         shell: pwsh
         run: .\src\powershell\fan\Deploy-SecureAcerFanUpdate.ps1 -ValidateOnly

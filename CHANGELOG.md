@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added the mock-tested, read-only limit telemetry v0 sampler with sanitized JSONL, bounded rotation, WHEA aggregates, GPU fail-soft collection, hypothesis summaries, and an AST prohibition gate; reference-machine FMA/GPU windows remain pending.
 - Recorded the PH317-51 hardware/driver baseline and cross-OEM bindings.
 - Validated direct Acer WMI/ACPI fan control at 6122 RPM on both fans.
 - Measured a 12 °C maximum-temperature reduction and 8.5 % throughput increase versus Auto under an identical ten-minute FMA workload.
