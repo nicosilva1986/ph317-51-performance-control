@@ -2,6 +2,13 @@
   "schemaVersion": 1,
   "installedAt": "2026-08-21T23:22:55-03:00",
   "platform": "Acer Predator PH317-51",
+  "hashSemantics": {
+    "algorithm": "SHA-256",
+    "input": "raw file bytes",
+    "textEncoding": "UTF-8 without BOM",
+    "lineEndings": "LF",
+    "repositoryBytesMatchInstalledBytes": true
+  },
   "artifacts": {
     "controllerSha256": "5720D2206FE31EE94E40771BCF6548DCF40485BA361CFDE272CAEA06464BDA1D",
     "configSha256": "B32BDEF1B120F40A979A3BD313ED11558E98582E90A1AD4B866E49898A48CED5",

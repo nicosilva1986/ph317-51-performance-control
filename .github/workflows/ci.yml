@@ -47,6 +47,14 @@ jobs:
         shell: pwsh
         run: .\tests\Test-AcerFanWatchdog.ps1
 
+      - name: CRUWBlocker preflight invariant tests
+        shell: pwsh
+        run: .\tests\Test-CRUWBlockerPreflightCore.ps1
+
+      - name: CRUWBlocker preflight invariant tests — Windows PowerShell 5.1
+        shell: powershell
+        run: .\tests\Test-CRUWBlockerPreflightCore.ps1
+
       - name: Sanitized exporter tests — PowerShell 7
         shell: pwsh
         run: .\tests\Test-ExportSanitizedBaseline.ps1

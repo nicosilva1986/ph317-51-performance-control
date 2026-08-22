@@ -82,4 +82,14 @@ pwsh -NoProfile -File .\src\powershell\Export-SanitizedBaseline.ps1 `
 - zero pending-reboot indicators;
 - a physical reboot window.
 
+For this notebook, where the owner explicitly stated that System Restore was disabled before the temporary maintenance window, the fresh preflight is:
+
+```powershell
+pwsh -NoProfile -File .\src\powershell\maintenance\Prepare-CRUWBlockerRemoval.ps1 `
+  -OffMachineRecoveryKeyConfirmed `
+  -UserDeclaredOriginalSystemRestoreDisabled
+```
+
+The switch records the owner's declaration for later restoration; it does not make a failed technical gate pass. The preflight discovers the current OEM INF instead of assuming `oem127.inf`, requires exactly the two internal C:/D: disks, verifies the Microsoft `disk.inf` fallback, seals the boot identity and complete filter snapshot, and writes byte-matched backups with SYSTEM/Administrators-only ACLs on both physical disks.
+
 Never paste the recovery password into a parameter, terminal log, issue, or repository file.
