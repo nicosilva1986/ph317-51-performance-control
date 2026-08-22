@@ -2,6 +2,13 @@
 
 Append-only. Newest entries at the top.
 
+## 2026-08-22 — Cross-vendor control landscape
+
+- Question: CPU/GPU behaviour and solutions on other brands; are we missing an approach?
+- Conclusion: heat is genre-wide; **PH317-51 bottleneck remains Acer platform policy**. Solution schools are (1) official WMI/ACPI (G-Helper, LLT, Acer-P-Helper, us) vs (2) EC poke (NBFC, WinRing0). No better public stack for this SKU with fail-closed + evidence + native turbo.
+- Borrow as product ideas only: composite AC/DC profiles, predictive dT/dt, Cooler-Boost-style MAX overlay, GPU telemetry — stay on WMI.
+- Captured in `cross-vendor-control-landscape.md`.
+
 ## 2026-08-22 — Platform vs micro; multi-language forum sweep
 
 - Question: is the need for this project the 7700HQ or Acer?

@@ -6,8 +6,9 @@ Read order for humans. Implementation details live in the linked files.
 
 1. [README](../README.md) — why the project exists and measured fan Auto vs Max
 2. [research/platform-thermal-context.md](../research/platform-thermal-context.md) — micro vs Acer platform
-3. [architecture.md](architecture.md) — control planes and fail-closed rules
-4. [usage.md](usage.md) — how to run tests and the fan stack on the reference machine
+3. [research/cross-vendor-control-landscape.md](../research/cross-vendor-control-landscape.md) — how other brands solve the same class of problem
+4. [architecture.md](architecture.md) — control planes and fail-closed rules
+5. [usage.md](usage.md) — how to run tests and the fan stack on the reference machine
 
 ## Fan / WMI (daily control plane)
 
@@ -42,6 +43,8 @@ Read order for humans. Implementation details live in the linked files.
 | Doc | Content |
 |-----|---------|
 | [research/README.md](../research/README.md) | Index |
+| [research/platform-thermal-context.md](../research/platform-thermal-context.md) | Micro vs Acer |
+| [research/cross-vendor-control-landscape.md](../research/cross-vendor-control-landscape.md) | Multi-vendor control methods |
 | [research/forum-sources.md](../research/forum-sources.md) | Multi-language sources |
 | [research/repo-health-2026-08-22.md](../research/repo-health-2026-08-22.md) | Navigability / health snapshot |
 | [research/log.md](../research/log.md) | Append-only research log |
