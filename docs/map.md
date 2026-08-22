@@ -42,19 +42,14 @@ Read order for humans. Implementation details live in the linked files.
 
 ## Research (not runtime)
 
-| Doc | Content |
-|-----|---------|
-| [research/README.md](../research/README.md) | Index |
-| [research/platform-thermal-context.md](../research/platform-thermal-context.md) | Micro vs Acer |
-| [research/cross-vendor-control-landscape.md](../research/cross-vendor-control-landscape.md) | Multi-vendor control methods |
-| [research/cpu-gpu-silicon-notes.md](../research/cpu-gpu-silicon-notes.md) | CPU/GPU silicon and platform power |
-| [research/prochot-and-tcc-offset.md](../research/prochot-and-tcc-offset.md) | Thermal trip offsets and BD PROCHOT |
-| [research/gpu-thermal-and-undervolt.md](../research/gpu-thermal-and-undervolt.md) | GTX 1060 heat, UV/PL, non-goals |
-| [research/evidence-benchmarks-analysis.md](../research/evidence-benchmarks-analysis.md) | Analysis of evidence JSON |
-| [research/forum-sources.md](../research/forum-sources.md) | Multi-language sources |
-| [research/conversation-coverage-2026-08-22.md](../research/conversation-coverage-2026-08-22.md) | Topic coverage matrix |
-| [research/repo-health-2026-08-22.md](../research/repo-health-2026-08-22.md) | Navigability / health snapshot |
-| [research/log.md](../research/log.md) | Append-only research log |
+Index by category: [research/README.md](../research/README.md) (flat files).
+
+| Category | Docs |
+|----------|------|
+| **Platform** | [platform-thermal-context](../research/platform-thermal-context.md), [forum-sources](../research/forum-sources.md) |
+| **Silicon** | [cpu-gpu-silicon-notes](../research/cpu-gpu-silicon-notes.md), [prochot-and-tcc-offset](../research/prochot-and-tcc-offset.md), [gpu-thermal-and-undervolt](../research/gpu-thermal-and-undervolt.md) |
+| **Ecosystem** | [cross-vendor-control-landscape](../research/cross-vendor-control-landscape.md) |
+| **Meta** | [evidence-benchmarks-analysis](../research/evidence-benchmarks-analysis.md), [conversation-coverage](../research/conversation-coverage-2026-08-22.md), [repo-health](../research/repo-health-2026-08-22.md), [log](../research/log.md) |
 
 ## Evidence
 

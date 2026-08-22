@@ -2,6 +2,11 @@
 
 Append-only. Newest entries at the top.
 
+## 2026-08-22 — Research index categories (Option A)
+
+- Grouped notes in `research/README.md` under Platform, Silicon, Ecosystem, Meta.
+- Files remain flat; no path moves.
+
 ## 2026-08-22 — Gap fill: silicon, PROCHOT, evidence analysis
 
 - Compared full conversation topics to existing `research/` set.
