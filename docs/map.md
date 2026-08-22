@@ -7,8 +7,9 @@ Read order for humans. Implementation details live in the linked files.
 1. [README](../README.md) — why the project exists and measured fan Auto vs Max
 2. [research/platform-thermal-context.md](../research/platform-thermal-context.md) — micro vs Acer platform
 3. [research/cross-vendor-control-landscape.md](../research/cross-vendor-control-landscape.md) — how other brands solve the same class of problem
-4. [architecture.md](architecture.md) — control planes and fail-closed rules
-5. [usage.md](usage.md) — how to run tests and the fan stack on the reference machine
+4. [research/cpu-gpu-silicon-notes.md](../research/cpu-gpu-silicon-notes.md) — turbo bins, GPU TGP, power limit stack
+5. [architecture.md](architecture.md) — control planes and fail-closed rules
+6. [usage.md](usage.md) — how to run tests and the fan stack on the reference machine
 
 ## Fan / WMI (daily control plane)
 
@@ -28,6 +29,7 @@ Read order for humans. Implementation details live in the linked files.
 | Doc | Content |
 |-----|---------|
 | [native-turbo-plan.md](native-turbo-plan.md) | Leave ThrottleStop 28×; stock Intel ratios + power plan |
+| [research/prochot-and-tcc-offset.md](../research/prochot-and-tcc-offset.md) | PROCHOT / BD PROCHOT / Tcc offset (read-only research) |
 
 ## Driver hygiene / CRUW (maintenance window only)
 
@@ -45,8 +47,12 @@ Read order for humans. Implementation details live in the linked files.
 | [research/README.md](../research/README.md) | Index |
 | [research/platform-thermal-context.md](../research/platform-thermal-context.md) | Micro vs Acer |
 | [research/cross-vendor-control-landscape.md](../research/cross-vendor-control-landscape.md) | Multi-vendor control methods |
+| [research/cpu-gpu-silicon-notes.md](../research/cpu-gpu-silicon-notes.md) | CPU/GPU silicon and platform power |
+| [research/prochot-and-tcc-offset.md](../research/prochot-and-tcc-offset.md) | Thermal trip offsets and BD PROCHOT |
 | [research/gpu-thermal-and-undervolt.md](../research/gpu-thermal-and-undervolt.md) | GTX 1060 heat, UV/PL, non-goals |
+| [research/evidence-benchmarks-analysis.md](../research/evidence-benchmarks-analysis.md) | Analysis of evidence JSON |
 | [research/forum-sources.md](../research/forum-sources.md) | Multi-language sources |
+| [research/conversation-coverage-2026-08-22.md](../research/conversation-coverage-2026-08-22.md) | Topic coverage matrix |
 | [research/repo-health-2026-08-22.md](../research/repo-health-2026-08-22.md) | Navigability / health snapshot |
 | [research/log.md](../research/log.md) | Append-only research log |
 

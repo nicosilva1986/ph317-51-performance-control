@@ -2,6 +2,16 @@
 
 Append-only. Newest entries at the top.
 
+## 2026-08-22 — Gap fill: silicon, PROCHOT, evidence analysis
+
+- Compared full conversation topics to existing `research/` set.
+- **Missing prose added:**
+  - `cpu-gpu-silicon-notes.md` — turbo bins 38/36/34, cTDP 35 W, PL/Tau, 1060 ~80 W TGP, Optimus, adapter ceiling, limit stack order
+  - `prochot-and-tcc-offset.md` — PROCHOT vs BD PROCHOT vs Tcc offset, MSRs, Helios notes, read-only project posture
+  - `evidence-benchmarks-analysis.md` — structured read of Auto vs Max + recovery JSON vs controller config
+  - `conversation-coverage-2026-08-22.md` — coverage matrix
+- Already present (unchanged intent): platform thermal, cross-vendor, GPU UV, forums, repo health.
+
 ## 2026-08-22 — GPU thermal role and undervolt
 
 - Question: is there a ThrottleStop-like path for the GTX 1060, and what does UV improve?
