@@ -73,10 +73,19 @@ jobs:
         shell: pwsh
         run: |
           $PSNativeCommandUseErrorActionPreference = $false
-          & pwsh -NoProfile -File .\src\powershell\maintenance\Prepare-CRUWRecoveryFacilities.ps1 2>$null
-          if ($LASTEXITCODE -eq 0) { throw 'Recovery-facilities preparer ran without explicit confirmation' }
-          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\src\powershell\maintenance\Prepare-CRUWRecoveryFacilities.ps1 2>$null
-          if ($LASTEXITCODE -eq 0) { throw 'Windows PowerShell recovery-facilities preparer ran without explicit confirmation' }
+          $expectedMessage = 'Explicit -ConfirmTemporaryRecoveryEnablement is required'
+          $pwshOutput = (& pwsh -NoProfile -File .\src\powershell\maintenance\Prepare-CRUWRecoveryFacilities.ps1 2>&1 | Out-String)
+          $pwshExitCode = $LASTEXITCODE
+          if ($pwshExitCode -eq 0 -or $pwshOutput -notmatch [regex]::Escape($expectedMessage)) {
+            throw "PowerShell 7 recovery-facilities guard failed: exit=$pwshExitCode"
+          }
+          $windowsPowerShellOutput = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\src\powershell\maintenance\Prepare-CRUWRecoveryFacilities.ps1 2>&1 | Out-String)
+          $windowsPowerShellExitCode = $LASTEXITCODE
+          if ($windowsPowerShellExitCode -eq 0 -or $windowsPowerShellOutput -notmatch [regex]::Escape($expectedMessage)) {
+            throw "Windows PowerShell recovery-facilities guard failed: exit=$windowsPowerShellExitCode"
+          }
+          Write-Host "PASS: recovery-facilities guard rejected missing confirmation in both engines"
+          exit 0
 
       - name: CRUWBlocker transaction simulations — PowerShell 7
         shell: pwsh
