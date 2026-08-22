@@ -1,0 +1,39 @@
+# Research log
+
+Append-only. Newest entries at the top.
+
+## 2026-08-22 — Gap fill: silicon, PROCHOT, evidence analysis
+
+- Compared full conversation topics to existing `research/` set.
+- **Missing prose added:**
+  - `cpu-gpu-silicon-notes.md` — turbo bins 38/36/34, cTDP 35 W, PL/Tau, 1060 ~80 W TGP, Optimus, adapter ceiling, limit stack order
+  - `prochot-and-tcc-offset.md` — PROCHOT vs BD PROCHOT vs Tcc offset, MSRs, Helios notes, read-only project posture
+  - `evidence-benchmarks-analysis.md` — structured read of Auto vs Max + recovery JSON vs controller config
+  - `conversation-coverage-2026-08-22.md` — coverage matrix
+- Already present (unchanged intent): platform thermal, cross-vendor, GPU UV, forums, repo health.
+
+## 2026-08-22 — GPU thermal role and undervolt
+
+- Question: is there a ThrottleStop-like path for the GTX 1060, and what does UV improve?
+- Conclusion: Afterburner V/F curve + power limit are the community tools; goal is same/stable FPS at lower watts/heat; shared heatpipes can cool CPU indirectly under gaming. Not for SYSTEM fan stack.
+- Local evidence still CPU-FMA-only; need 3D workload telemetry before claiming GPU is the dominant heat source on this unit.
+- Captured in `gpu-thermal-and-undervolt.md`. Tracker issue opened for evidence + optional operator UV posture.
+
+## 2026-08-22 — Cross-vendor control landscape
+
+- Question: CPU/GPU behaviour and solutions on other brands; are we missing an approach?
+- Conclusion: heat is genre-wide; **PH317-51 bottleneck remains Acer platform policy**. Solution schools are (1) official WMI/ACPI (G-Helper, LLT, Acer-P-Helper, us) vs (2) EC poke (NBFC, WinRing0). No better public stack for this SKU with fail-closed + evidence + native turbo.
+- Borrow as product ideas only: composite AC/DC profiles, predictive dT/dt, Cooler-Boost-style MAX overlay, GPU telemetry — stay on WMI.
+- Captured in `cross-vendor-control-landscape.md`.
+
+## 2026-08-22 — Platform vs micro; multi-language forum sweep
+
+- Question: is the need for this project the 7700HQ or Acer?
+- Conclusion: silicon is expected-hot H-series; **Acer cooling + Auto fan policy** are the platform drivers; reference machine adds ThrottleStop 28× and aging hardware.
+- Captured in `platform-thermal-context.md` + `forum-sources.md`.
+- Languages touched: EN (Acer Community, TechRadar, LaptopMedia), DE (Acer Community), PL (Notebookcheck/PurePC), RO (mygarage), ES (Geeknetic).
+- Local evidence already on main: Auto vs Max FMA JSON under `evidence/benchmarks/`.
+
+## 2026-08-22 — Repo health pass
+
+- Written `repo-health-2026-08-22.md`: strengths (evidence, fail-closed, docs, security posture) and friction (CRUW monolith size, fan modularization not cut over, issue backlog, docs discoverability, branch `refactor/fan-modules` not merged).

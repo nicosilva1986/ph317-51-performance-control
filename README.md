@@ -4,6 +4,8 @@ Evidence-led thermal, fan, Turbo Boost, power-policy, and driver hygiene tooling
 
 > Estado: desarrollo privado y experimental. Validado inicialmente en una sola PH317-51. No ejecutar todavía en otro equipo.
 
+**Mapa de docs:** [docs/map.md](docs/map.md) · **Investigación / contexto de plataforma:** [research/](research/README.md)
+
 ## Por qué existe
 
 En la máquina de referencia encontramos tres problemas distintos que las herramientas genéricas mezclaban:
@@ -11,6 +13,8 @@ En la máquina de referencia encontramos tres problemas distintos que las herram
 1. El perfil local de ThrottleStop imponía un límite artificial de 28x, aunque el i7-7700HQ admite los ratios Intel 38/36/35/34 según cantidad de núcleos activos.
 2. El modo automático de ventiladores reaccionaba demasiado tarde. El firmware Acer ya ofrecía una interfaz WMI/ACPI legítima y reversible; no fue necesario escribir directamente al EC.
 3. Windows conservaba bindings de drivers de otros equipos, incluido un filtro forense CRU activo sobre ambos discos internos.
+
+A nivel de ecosistema Helios 300, el cuello práctico es sobre todo la **plataforma Acer** (cooling + curva Auto), no un 7700HQ “defectuoso”. Detalle y fuentes: [research/platform-thermal-context.md](research/platform-thermal-context.md).
 
 El objetivo no es "overclockear" ni aplicar tweaks ciegos. Es recuperar el rendimiento diseñado por Intel/Acer, medir cada cambio y mantener una ruta de rollback.
 
@@ -33,7 +37,7 @@ Max redujo la máxima 12 °C, redujo el promedio 10,5 °C y mejoró el throughpu
 - **Driver hygiene:** preflight schema v3, seis scripts sellados, backups dobles, journal transaccional y rebind reversible sin `/force`. La recuperación nunca repite una eliminación ambigua. Los binarios de terceros no se publican.
 - **Evidence first:** toda afirmación de rendimiento debe enlazar una carga reproducible, datos térmicos y ausencia/presencia de WHEA.
 
-Ver [uso y pruebas](docs/usage.md), [arquitectura](docs/architecture.md), [superficie WMI](docs/wmi-surface.md), [inventario inicial](docs/hardware-and-driver-baseline.md), [plan Turbo nativo](docs/native-turbo-plan.md), [recuperación](docs/recovery-and-rollback.md), [roadmap de controles siguientes](docs/roadmap-next-controls.md), [experimento Custom %](docs/fan-curve-experiment.md), [telemetría de límites](docs/limit-telemetry-proposal.md) y la [revisión de mejoras pendientes](docs/improvement-review.md).
+Ver [mapa](docs/map.md), [uso y pruebas](docs/usage.md), [arquitectura](docs/architecture.md), [superficie WMI](docs/wmi-surface.md), [inventario inicial](docs/hardware-and-driver-baseline.md), [plan Turbo nativo](docs/native-turbo-plan.md), [recuperación](docs/recovery-and-rollback.md), [roadmap de controles siguientes](docs/roadmap-next-controls.md), [experimento Custom %](docs/fan-curve-experiment.md), [telemetría de límites](docs/limit-telemetry-proposal.md) y la [revisión de mejoras pendientes](docs/improvement-review.md).
 
 > La comparación Auto/Max de arriba es **solo de ventiladores**, medida con el multiplicador fijo en 28x. Después de la migración a Turbo nativo habrá que volver a medirla.
 
@@ -65,6 +69,7 @@ El driver `ThrottleStop.sys` 3.0.0.0 observado localmente coincide con la versi�
 - [Linux `acer-wmi.c`](https://github.com/torvalds/linux/blob/master/drivers/platform/x86/acer-wmi.c)
 - [Acer PH317-51 support](https://www.acer.com/ar-es/support/product-support/Predator_PH317-51/downloads)
 - [NVD CVE-2025-7771](https://nvd.nist.gov/vuln/detail/CVE-2025-7771)
+- Investigación de foros / plataforma: [research/forum-sources.md](research/forum-sources.md)
 
 ## Publicación
 

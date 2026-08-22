@@ -1,0 +1,66 @@
+{
+  "schemaVersion": 1,
+  "sourceCommit": "022ab754d11f3023a0937302c4188147a5fa6447",
+  "installedAt": "2026-08-22T08:32:06-03:00",
+  "observedAt": "2026-08-22T08:39:22-03:00",
+  "platform": "Acer Predator PH317-51",
+  "hashSemantics": {
+    "algorithm": "SHA-256",
+    "input": "raw file bytes",
+    "repositoryBytesMatchInstalledBytes": true
+  },
+  "artifacts": {
+    "controllerSha256": "1B62267AFD78D3A64D65A68EBC47DE673AE441F860EAA4A1F5D44D89844D94AB",
+    "configSha256": "B44D858B0CC6B5CB8FBEB0728590C395F0064831FCB111D11EC143D424FFCFF9",
+    "watchdogSha256": "B67CCF9B168E55379201789991EE2E3E028EED4F51FCD416085FA0AF49B94D8B",
+    "installerSha256": "1281684F05E9A70D8F775840CB19A4265FB161B648693191A200CA31B1A8FF48"
+  },
+  "installation": {
+    "controllerTask": "Running",
+    "watchdogTask": "Running",
+    "systemTaskProcesses": 2,
+    "aclVerified": true,
+    "hashesVerified": true,
+    "rollbackAttempted": false,
+    "status": "PASS"
+  },
+  "releaseReadback": {
+    "transitionAt": "2026-08-22T08:36:58-03:00",
+    "from": "MAX",
+    "to": "AUTO",
+    "reason": "sustained_cool_idle",
+    "state": "AUTO",
+    "health": "HEALTHY_VERIFIED",
+    "fanBehavior": 256,
+    "cpuFanRpm": 0,
+    "gpuFanRpm": 0,
+    "cpuTempC": 37,
+    "acerGpuTempC": 0,
+    "systemTempC": 34,
+    "cpuLoadPct": 14,
+    "cpuMaxLogicalLoadPct": 28,
+    "watchdogRestartsAfterDeployment": 0
+  },
+  "vendorGpuReadback": {
+    "provider": "nvidia-smi",
+    "temperatureC": 34,
+    "utilizationPct": 0,
+    "performanceState": "P0",
+    "graphicsClockMHz": 873,
+    "powerW": 22.86,
+    "activeThrottleReasons": "0x0000000000000000"
+  },
+  "health": {
+    "wheaEventsAfterDeployment": 0,
+    "controllerFailures": 0,
+    "backgroundLoadObservedDuringResidencePct": 35,
+    "backgroundMaxLogicalLoadObservedDuringResidencePct": 63
+  },
+  "limitations": [
+    "This release gate proves the real idle MAX-to-AUTO transition and watchdog stability; it is not a benchmark.",
+    "Acer WMI reported an absent GPU temperature while NVIDIA reported 34 C, so later workload telemetry must retain both sources."
+  ],
+  "pathsIncluded": false,
+  "deviceIdentifiersIncluded": false,
+  "secretsIncluded": false
+}

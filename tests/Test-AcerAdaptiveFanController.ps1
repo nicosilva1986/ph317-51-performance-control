@@ -3,25 +3,41 @@ $root = Split-Path -Parent $PSCommandPath
 $fanRoot = [IO.Path]::GetFullPath((Join-Path $root '..\src\powershell\fan'))
 $controller = Join-Path $fanRoot 'AcerAdaptiveFanController.ps1'
 $config = Join-Path $fanRoot 'fan-controller-config.json'
+$engineName = if ($PSVersionTable.PSEdition -eq 'Core') { 'pwsh.exe' } else { 'powershell.exe' }
+$engine = Join-Path $PSHOME $engineName
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) ('AcerAdaptiveFanTests-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $testRoot | Out-Null
 
 function New-Sample {
-    param([int] $Cpu, [int] $Gpu, [int] $System, [int] $Load, [int] $MaxLogical = -1)
+    param(
+        [int] $Cpu,
+        [int] $Gpu,
+        [int] $System,
+        [int] $Load,
+        [int] $MaxLogical = -1,
+        [int] $Behavior = -1,
+        [int] $CpuFanRpm = -1,
+        [int] $GpuFanRpm = -1
+    )
     $sample = [ordered]@{ cpuTempC = $Cpu; gpuTempC = $Gpu; systemTempC = $System; cpuLoadPct = $Load }
     if ($MaxLogical -ge 0) { $sample.cpuMaxLogicalLoadPct = $MaxLogical }
+    if ($Behavior -ge 0) { $sample.fanBehaviorBitmap = [uint32]$Behavior }
+    if ($CpuFanRpm -ge 0) { $sample.cpuFanRpm = $CpuFanRpm }
+    if ($GpuFanRpm -ge 0) { $sample.gpuFanRpm = $GpuFanRpm }
     return $sample
 }
 
 function Invoke-SimulationCase {
-    param([string] $Name, [string] $InitialState, [object[]] $Samples)
+    param([string] $Name, [string] $InitialState, [object[]] $Samples, [object[]] $AutoWriteReadbacks = @())
     $caseRoot = Join-Path $testRoot $Name
     New-Item -ItemType Directory -Path $caseRoot | Out-Null
     $simulationPath = Join-Path $caseRoot 'simulation.json'
     $logPath = Join-Path $caseRoot 'events.jsonl'
     $statusPath = Join-Path $caseRoot 'status.json'
-    [ordered]@{ initialState = $InitialState; samples = $Samples } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $simulationPath -Encoding utf8
-    $raw = & (Join-Path $PSHOME 'pwsh.exe') -NoLogo -NoProfile -NonInteractive -File $controller -ConfigPath $config -SimulationPath $simulationPath -LogPath $logPath -StatusPath $statusPath
+    $simulation = [ordered]@{ initialState = $InitialState; samples = $Samples }
+    if (@($AutoWriteReadbacks).Count -gt 0) { $simulation.autoWriteReadbacks = @($AutoWriteReadbacks) }
+    $simulation | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $simulationPath -Encoding utf8
+    $raw = & $engine -NoLogo -NoProfile -NonInteractive -File $controller -ConfigPath $config -SimulationPath $simulationPath -LogPath $logPath -StatusPath $statusPath
     if ($LASTEXITCODE -ne 0) { throw "Simulation $Name exited $LASTEXITCODE." }
     return [pscustomobject]@{
         result = ($raw | ConvertFrom-Json)
@@ -32,6 +48,22 @@ function Invoke-SimulationCase {
 
 $caseResults = [System.Collections.Generic.List[object]]::new()
 try {
+    $policy = Get-Content -LiteralPath $config -Raw | ConvertFrom-Json
+    if ([int]$policy.pollSeconds -ne 2 -or [int]$policy.releaseSamples -ne 60 -or
+        [int]$policy.minMaxSeconds -ne 300 -or [int]$policy.preemptCpuMaxLogicalLoadPct -ne 70 -or
+        [int]$policy.preemptLoadSamples -ne 2) {
+        throw 'Fan release policy contract drifted from the validated 2-minute idle / 5-minute MAX calibration.'
+    }
+    $caseResults.Add([ordered]@{ name = 'release-policy-contract'; status = 'PASS' })
+
+    $samples = [System.Collections.Generic.List[object]]::new()
+    1..60 | ForEach-Object { $samples.Add((New-Sample 48 0 45 8)) }
+    $case = Invoke-SimulationCase -Name 'minimum-max-residence' -InitialState MAX -Samples $samples
+    if (@($case.result.transitions).Count -ne 0 -or $case.status.state -ne 'MAX' -or [int]$case.status.coolSamples -ne 60) {
+        throw 'The 5-minute minimum MAX residence was weakened by the shorter idle-sample gate.'
+    }
+    $caseResults.Add([ordered]@{ name = 'minimum-max-residence'; status = 'PASS' })
+
     $samples = [System.Collections.Generic.List[object]]::new()
     1..3 | ForEach-Object { $samples.Add((New-Sample 50 0 45 5)) }
     1..3 | ForEach-Object { $samples.Add((New-Sample 52 0 46 80)) }
@@ -70,6 +102,195 @@ try {
     if ($transitions[0].to -ne 'MAX' -or $transitions[1].to -ne 'AUTO' -or $transitions[2].reason -ne 'sensor_fail_safe') { throw 'Hysteresis/fail-safe transition sequence failed.' }
     if ($case.status.state -ne 'MAX' -or $case.status.status -ne 'DEGRADED_FAIL_SAFE') { throw 'Sensor fail-safe status is incorrect.' }
     $caseResults.Add([ordered]@{ name = 'hysteresis-and-sensor-failure'; status = 'PASS' })
+
+    $samples = [System.Collections.Generic.List[object]]::new()
+    1..40 | ForEach-Object {
+        $samples.Add((New-Sample 48 0 45 8))
+        $samples.Add((New-Sample 48 0 45 8))
+        $samples.Add((New-Sample 48 0 45 8))
+        $samples.Add((New-Sample 52 0 45 8))
+    }
+    $case = Invoke-SimulationCase -Name 'safe-jitter-eventually-releases' -InitialState MAX -Samples $samples
+    $transitions = @($case.result.transitions)
+    $expectedRelease = [datetimeoffset]'2026-01-01T00:05:00Z'
+    $actualRelease = if ($transitions.Count -eq 1) { ([datetimeoffset]$transitions[0].at).ToUniversalTime() } else { $null }
+    if ($transitions.Count -ne 1 -or $transitions[0].from -ne 'MAX' -or $transitions[0].to -ne 'AUTO' -or
+        $actualRelease -ne $expectedRelease) {
+        throw 'Normal sensor quantization while safely cool prevented release to Auto.'
+    }
+    $caseResults.Add([ordered]@{ name = 'safe-jitter-eventually-releases'; status = 'PASS' })
+
+    $samples = [System.Collections.Generic.List[object]]::new()
+    1..151 | ForEach-Object { $samples.Add((New-Sample 48 0 45 8 10 512 6122 6122)) }
+    $staleReadback = New-Sample 48 0 45 8 10 512 6122 6122
+    $autoReadback = New-Sample 48 0 45 8 10 256 2500 2500
+    $case = Invoke-SimulationCase -Name 'auto-transition-publishes-post-write-readback' -InitialState MAX -Samples $samples -AutoWriteReadbacks @($staleReadback, $autoReadback)
+    if (@($case.result.transitions).Count -ne 1 -or $case.status.state -ne 'AUTO' -or
+        [uint32]$case.status.fanBehaviorBitmap -ne 256) {
+        throw 'AUTO transition published the stale pre-write MAX firmware sample.'
+    }
+    $caseResults.Add([ordered]@{ name = 'auto-transition-publishes-post-write-readback'; status = 'PASS' })
+
+    $samples = [System.Collections.Generic.List[object]]::new()
+    1..151 | ForEach-Object { $samples.Add((New-Sample 48 0 45 8 10 512 6122 6122)) }
+    $staleReadbacks = 1..5 | ForEach-Object { New-Sample 48 0 45 8 10 512 6122 6122 }
+    $case = Invoke-SimulationCase -Name 'auto-readback-failure-remains-max' -InitialState MAX -Samples $samples -AutoWriteReadbacks $staleReadbacks
+    if (@($case.result.transitions).Count -ne 0 -or $case.result.finalState -ne 'MAX' -or
+        $case.status.state -ne 'MAX' -or $case.status.status -ne 'DEGRADED_FAIL_SAFE' -or
+        [string]$case.status.lastError -notlike 'AUTO firmware readback verification failed.*MAX fallback requested.*') {
+        throw 'Unverified AUTO did not fail closed in MAX with an actionable degraded status.'
+    }
+    $caseResults.Add([ordered]@{ name = 'auto-readback-failure-remains-max'; status = 'PASS' })
+
+    1..59 | ForEach-Object { $samples.Add((New-Sample 48 0 45 8 10 512 6122 6122)) }
+    $case = Invoke-SimulationCase -Name 'auto-readback-failure-rearms-hysteresis' -InitialState MAX -Samples $samples -AutoWriteReadbacks $staleReadbacks
+    $verificationErrors = @($case.events | Where-Object {
+        $_.event -eq 'sensor_or_control_error' -and [string]$_.message -like 'AUTO firmware readback verification failed.*'
+    })
+    if ($verificationErrors.Count -ne 1 -or $case.result.finalState -ne 'MAX' -or
+        $case.status.state -ne 'MAX' -or [int]$case.status.coolSamples -ne 59 -or
+        @($case.result.transitions).Count -ne 0) {
+        throw 'Failed AUTO verification was retried without a new residence and cool-idle qualification interval.'
+    }
+    $caseResults.Add([ordered]@{ name = 'auto-readback-failure-rearms-hysteresis'; status = 'PASS' })
+
+    $samples.Add((New-Sample 48 0 45 8 10 512 6122 6122))
+    $case = Invoke-SimulationCase -Name 'exhausted-auto-readbacks-stay-fail-closed' -InitialState MAX -Samples $samples -AutoWriteReadbacks $staleReadbacks
+    $verificationErrors = @($case.events | Where-Object {
+        $_.event -eq 'sensor_or_control_error' -and [string]$_.message -like 'AUTO firmware readback verification failed.*'
+    })
+    if ($verificationErrors.Count -ne 2 -or $case.result.finalState -ne 'MAX' -or
+        $case.status.state -ne 'MAX' -or $case.status.status -ne 'DEGRADED_FAIL_SAFE' -or
+        @($case.result.transitions).Count -ne 0) {
+        throw 'Exhausted simulated AUTO readbacks silently bypassed verification or left fail-safe MAX.'
+    }
+    $caseResults.Add([ordered]@{ name = 'exhausted-auto-readbacks-stay-fail-closed'; status = 'PASS' })
+
+    $samples = [System.Collections.Generic.List[object]]::new()
+    1..150 | ForEach-Object { $samples.Add((New-Sample 48 0 45 8)) }
+    $samples.Add((New-Sample 52 0 45 8))
+    $samples.Add((New-Sample 48 0 45 8))
+    $case = Invoke-SimulationCase -Name 'trend-gates-release-instant' -InitialState MAX -Samples $samples
+    $transitions = @($case.result.transitions)
+    $expectedRelease = [datetimeoffset]'2026-01-01T00:05:02Z'
+    $actualRelease = if ($transitions.Count -eq 1) { ([datetimeoffset]$transitions[0].at).ToUniversalTime() } else { $null }
+    if ($transitions.Count -ne 1 -or $actualRelease -ne $expectedRelease) {
+        throw 'Release trend did not defer Auto until the first stable sample.'
+    }
+    $caseResults.Add([ordered]@{ name = 'trend-gates-release-instant'; status = 'PASS' })
+
+    $samples = [System.Collections.Generic.List[object]]::new()
+    1..100 | ForEach-Object { $samples.Add((New-Sample 48 0 45 8)) }
+    1..2 | ForEach-Object { $samples.Add((New-Sample 48 0 45 40)) }
+    1..60 | ForEach-Object { $samples.Add((New-Sample 48 0 45 8)) }
+    $case = Invoke-SimulationCase -Name 'two-minute-idle-release-after-demand' -InitialState MAX -Samples $samples
+    $transitions = @($case.result.transitions)
+    $expectedRelease = [datetimeoffset]'2026-01-01T00:05:22Z'
+    $actualRelease = if ($transitions.Count -eq 1) { ([datetimeoffset]$transitions[0].at).ToUniversalTime() } else { $null }
+    if ($transitions.Count -ne 1 -or $actualRelease -ne $expectedRelease) {
+        throw 'Auto did not release after the minimum MAX residence and two minutes of qualifying idle samples.'
+    }
+    $caseResults.Add([ordered]@{ name = 'two-minute-idle-release-after-demand'; status = 'PASS' })
+
+    $samples = [System.Collections.Generic.List[object]]::new()
+    1..149 | ForEach-Object { $samples.Add((New-Sample 48 0 45 8)) }
+    $samples.Add((New-Sample 48 0 45 21))
+    $samples.Add((New-Sample 48 0 45 8))
+    $case = Invoke-SimulationCase -Name 'transient-non-idle-sample-pauses-release' -InitialState MAX -Samples $samples
+    $transitions = @($case.result.transitions)
+    $expectedRelease = [datetimeoffset]'2026-01-01T00:05:00Z'
+    $actualRelease = if ($transitions.Count -eq 1) { ([datetimeoffset]$transitions[0].at).ToUniversalTime() } else { $null }
+    if ($transitions.Count -ne 1 -or $actualRelease -ne $expectedRelease) {
+        throw 'A transient non-idle sample erased the otherwise complete cool interval.'
+    }
+    $caseResults.Add([ordered]@{ name = 'transient-non-idle-sample-pauses-release'; status = 'PASS' })
+
+    $samples = [System.Collections.Generic.List[object]]::new()
+    1..150 | ForEach-Object { $samples.Add((New-Sample 48 0 45 8 10)) }
+    $samples.Add((New-Sample 48 0 45 10 80))
+    $samples.Add((New-Sample 48 0 45 8 10))
+    $case = Invoke-SimulationCase -Name 'transient-logical-core-spike-pauses-release' -InitialState MAX -Samples $samples
+    $transitions = @($case.result.transitions)
+    $expectedRelease = [datetimeoffset]'2026-01-01T00:05:02Z'
+    $actualRelease = if ($transitions.Count -eq 1) { ([datetimeoffset]$transitions[0].at).ToUniversalTime() } else { $null }
+    if ($transitions.Count -ne 1 -or $actualRelease -ne $expectedRelease) {
+        throw 'A transient logical-core spike did not pause release until the next idle sample.'
+    }
+    $caseResults.Add([ordered]@{ name = 'transient-logical-core-spike-pauses-release'; status = 'PASS' })
+
+    $samples = [System.Collections.Generic.List[object]]::new()
+    1..149 | ForEach-Object { $samples.Add((New-Sample 48 0 45 8)) }
+    $samples.Add((New-Sample 48 0 45 40))
+    $samples.Add((New-Sample 48 0 45 40))
+    1..59 | ForEach-Object { $samples.Add((New-Sample 48 0 45 8)) }
+    $case = Invoke-SimulationCase -Name 'sustained-demand-resets-release' -InitialState MAX -Samples $samples
+    if (@($case.result.transitions).Count -ne 0 -or $case.status.state -ne 'MAX' -or [int]$case.status.coolSamples -ne 59) {
+        throw 'Sustained CPU demand did not reset the cool interval.'
+    }
+    $samples.Add((New-Sample 48 0 45 8))
+    $case = Invoke-SimulationCase -Name 'release-after-full-post-demand-interval' -InitialState MAX -Samples $samples
+    $transitions = @($case.result.transitions)
+    $expectedRelease = [datetimeoffset]'2026-01-01T00:07:00Z'
+    $actualRelease = if ($transitions.Count -eq 1) { ([datetimeoffset]$transitions[0].at).ToUniversalTime() } else { $null }
+    if ($transitions.Count -ne 1 -or $actualRelease -ne $expectedRelease) {
+        throw 'Auto released before a complete cool interval after sustained demand.'
+    }
+    $caseResults.Add([ordered]@{ name = 'sustained-demand-resets-release'; status = 'PASS' })
+
+    $samples = [System.Collections.Generic.List[object]]::new()
+    1..149 | ForEach-Object { $samples.Add((New-Sample 48 0 45 8 10)) }
+    $samples.Add((New-Sample 48 0 45 10 80))
+    $samples.Add((New-Sample 48 0 45 10 80))
+    1..59 | ForEach-Object { $samples.Add((New-Sample 48 0 45 8 10)) }
+    $case = Invoke-SimulationCase -Name 'sustained-logical-core-demand-resets-release' -InitialState MAX -Samples $samples
+    if (@($case.result.transitions).Count -ne 0 -or $case.status.state -ne 'MAX' -or [int]$case.status.coolSamples -ne 59) {
+        throw 'Sustained logical-core demand did not reset the cool interval.'
+    }
+    $samples.Add((New-Sample 48 0 45 8 10))
+    $case = Invoke-SimulationCase -Name 'release-after-full-post-logical-demand-interval' -InitialState MAX -Samples $samples
+    $transitions = @($case.result.transitions)
+    $expectedRelease = [datetimeoffset]'2026-01-01T00:07:00Z'
+    $actualRelease = if ($transitions.Count -eq 1) { ([datetimeoffset]$transitions[0].at).ToUniversalTime() } else { $null }
+    if ($transitions.Count -ne 1 -or $actualRelease -ne $expectedRelease) {
+        throw 'Auto released before a complete idle interval after sustained logical-core demand.'
+    }
+    $caseResults.Add([ordered]@{ name = 'sustained-logical-core-demand-resets-release'; status = 'PASS' })
+
+    $samples = [System.Collections.Generic.List[object]]::new()
+    1..149 | ForEach-Object { $samples.Add((New-Sample 48 0 45 8)) }
+    $samples.Add((New-Sample 56 0 45 8))
+    1..59 | ForEach-Object { $samples.Add((New-Sample 48 0 45 8)) }
+    $case = Invoke-SimulationCase -Name 'thermal-envelope-violation-resets-release' -InitialState MAX -Samples $samples
+    if (@($case.result.transitions).Count -ne 0 -or $case.status.state -ne 'MAX' -or [int]$case.status.coolSamples -ne 59) {
+        throw 'A thermal release-envelope violation did not reset the cool interval.'
+    }
+    $samples.Add((New-Sample 48 0 45 8))
+    $case = Invoke-SimulationCase -Name 'release-after-full-post-thermal-violation-interval' -InitialState MAX -Samples $samples
+    $transitions = @($case.result.transitions)
+    $expectedRelease = [datetimeoffset]'2026-01-01T00:06:58Z'
+    $actualRelease = if ($transitions.Count -eq 1) { ([datetimeoffset]$transitions[0].at).ToUniversalTime() } else { $null }
+    if ($transitions.Count -ne 1 -or $actualRelease -ne $expectedRelease) {
+        throw 'Auto released before a complete idle interval after a thermal envelope violation.'
+    }
+    $caseResults.Add([ordered]@{ name = 'thermal-envelope-violation-resets-release'; status = 'PASS' })
+
+    $samples = [System.Collections.Generic.List[object]]::new()
+    1..149 | ForEach-Object { $samples.Add((New-Sample 48 0 45 8)) }
+    $samples.Add((New-Sample 55 0 45 8))
+    1..59 | ForEach-Object { $samples.Add((New-Sample 48 0 45 8)) }
+    $case = Invoke-SimulationCase -Name 'rapid-rise-resets-release' -InitialState MAX -Samples $samples
+    if (@($case.result.transitions).Count -ne 0 -or $case.status.state -ne 'MAX' -or [int]$case.status.coolSamples -ne 59) {
+        throw 'A rapid rise inside the release envelope did not reset the cool interval.'
+    }
+    $samples.Add((New-Sample 48 0 45 8))
+    $case = Invoke-SimulationCase -Name 'release-after-full-post-rise-interval' -InitialState MAX -Samples $samples
+    $transitions = @($case.result.transitions)
+    $expectedRelease = [datetimeoffset]'2026-01-01T00:06:58Z'
+    $actualRelease = if ($transitions.Count -eq 1) { ([datetimeoffset]$transitions[0].at).ToUniversalTime() } else { $null }
+    if ($transitions.Count -ne 1 -or $actualRelease -ne $expectedRelease) {
+        throw 'Auto released before a complete idle interval after a rapid thermal rise.'
+    }
+    $caseResults.Add([ordered]@{ name = 'rapid-rise-resets-release'; status = 'PASS' })
 
     $samples = [System.Collections.Generic.List[object]]::new()
     1..8 | ForEach-Object { $samples.Add((New-Sample 0 0 0 10)) }

@@ -8,6 +8,20 @@ Findings are ranked by the cost of leaving them alone. Every claim below cites
 the exact file and line it came from; nothing here was inferred from a
 description or a commit message.
 
+> **Line references in this document are as of `00214f5` and are now stale.**
+> `main` has since changed `AcerAdaptiveFanController.ps1` (+114 lines), so the
+> line numbers below no longer resolve. The findings themselves were re-verified
+> against `f397863` and still hold, with one partial exception noted under S3.
+>
+> **The issues are the maintained copy, not this file:** S1 → #18, S2 → #19,
+> S3 → #20, S5 → #21, S9 → #22, S10 → #23. S4 is tracked in #14, S7 in #10/#11/#12,
+> S8 in #5, and S6 is the CI fix in this PR. Each issue carries line references
+> against current `main`.
+>
+> Given `research/repo-health-2026-08-22.md` flags README/doc link sprawl, this
+> file is arguably redundant now that every finding has an issue. It is kept here
+> only pending a decision to drop it.
+
 ## Relationship to the roadmap
 
 [`roadmap-next-controls.md`](roadmap-next-controls.md) landed independently and

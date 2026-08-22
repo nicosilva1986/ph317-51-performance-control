@@ -2,6 +2,8 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSCommandPath
 $fanRoot = [IO.Path]::GetFullPath((Join-Path $root '..\src\powershell\fan'))
 $watchdog = Join-Path $fanRoot 'AcerFanWatchdog.ps1'
+$engineName = if ($PSVersionTable.PSEdition -eq 'Core') { 'pwsh.exe' } else { 'powershell.exe' }
+$engine = Join-Path $PSHOME $engineName
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) ('AcerFanWatchdogTests-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $testRoot | Out-Null
 
@@ -30,7 +32,7 @@ function Write-Heartbeat {
 }
 
 function Invoke-Probe {
-    $raw = & (Join-Path $PSHOME 'pwsh.exe') -NoLogo -NoProfile -NonInteractive -File $watchdog -Root $testRoot -ProbeOnly
+    $raw = & $engine -NoLogo -NoProfile -NonInteractive -File $watchdog -Root $testRoot -ProbeOnly
     $exitCode = $LASTEXITCODE
     return [pscustomobject]@{ exitCode = $exitCode; result = ($raw | ConvertFrom-Json) }
 }
