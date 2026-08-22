@@ -62,7 +62,7 @@ jobs:
         run: |
           $patterns = @(
             'C:\\Users\\soled',
-            'soledadortega',
+            ('soledad' + 'ortega'),
             'SCSI\\Disk',
             'gho_[A-Za-z0-9]+',
             '-----BEGIN (?:RSA |OPENSSH |EC )?PRIVATE KEY-----',
