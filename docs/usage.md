@@ -69,6 +69,19 @@ Get-Content C:\Acer-Driver-Audit\secure-fan-installation.json
 Get-Content C:\ProgramData\AcerAdaptiveFanControl\adaptive-fan-status.json
 ```
 
+For routine diagnostics from a non-elevated AI or user session, use the bounded
+sanitized reader instead of querying the SYSTEM-owned scheduled tasks:
+
+```powershell
+pwsh -NoProfile -File .\src\powershell\fan\Get-AcerFanAgentStatus.ps1
+```
+
+It returns one JSON document and does not request elevation, inspect protected
+task definitions, or mutate hardware. `HEALTHY` means the published heartbeat is
+fresh, reports `HEALTHY_VERIFIED`, and the installed controller/config/watchdog
+hashes match the installed integrity manifest. Use `-FailOnUnhealthy` only in a
+deterministic gate that expects exit code `2` for any non-healthy conclusion.
+
 ## Live fault tests
 
 These intentionally alter fan/task state and must only be run on the supported laptop after installation:
