@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "feat/**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  deterministic-tests:
+    runs-on: windows-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Parse every PowerShell script
+        shell: pwsh
+        run: |
+          $failed = @()
+          Get-ChildItem -Recurse -Filter *.ps1 | ForEach-Object {
+            $tokens = $null
+            $errors = $null
+            [Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$errors) | Out-Null
+            if (@($errors).Count) {
+              $failed += "${($_.FullName)}: $(@($errors).Message -join '; ')"
+            }
+          }
+          if ($failed.Count) { throw ($failed -join [Environment]::NewLine) }
+
+      - name: Validate JSON evidence
+        shell: pwsh
+        run: |
+          Get-ChildItem -Recurse -Filter *.json | ForEach-Object {
+            Get-Content -LiteralPath $_.FullName -Raw | ConvertFrom-Json | Out-Null
+          }
+
+      - name: Fan policy simulations
+        shell: pwsh
+        run: .\tests\Test-AcerAdaptiveFanController.ps1
+
+      - name: Watchdog fail-closed probes
+        shell: pwsh
+        run: .\tests\Test-AcerFanWatchdog.ps1
+
+      - name: CRUWBlocker preflight invariant tests
+        shell: pwsh
+        run: .\tests\Test-CRUWBlockerPreflightCore.ps1
+
+      - name: CRUWBlocker preflight invariant tests — Windows PowerShell 5.1
+        shell: powershell
+        run: .\tests\Test-CRUWBlockerPreflightCore.ps1
+
+      - name: Sanitized exporter tests — PowerShell 7
+        shell: pwsh
+        run: .\tests\Test-ExportSanitizedBaseline.ps1
+
+      - name: Sanitized exporter tests — Windows PowerShell 5.1
+        shell: powershell
+        run: .\tests\Test-ExportSanitizedBaseline.ps1
+
+      - name: Validate pinned release hashes
+        shell: pwsh
+        run: .\src\powershell\fan\Deploy-SecureAcerFanUpdate.ps1 -ValidateOnly
+
+      - name: Reject accidental local identity and secret patterns
+        shell: pwsh
+        run: |
+          $patterns = @(
+            'C:\\Users\\soled',
+            ('soledad' + 'ortega'),
+            'SCSI\\Disk',
+            'gho_[A-Za-z0-9]+',
+            '-----BEGIN (?:RSA |OPENSSH |EC )?PRIVATE KEY-----',
+            '\b\d{6}(?:-\d{6}){7}\b'
+          )
+          $files = Get-ChildItem -Recurse -File | Where-Object {
+            $_.FullName -notmatch '[\\/]\.git[\\/]' -and
+            $_.Name -notin @('Test-ExportSanitizedBaseline.ps1')
+          }
+          foreach ($pattern in $patterns) {
+            $matches = $files | Select-String -Pattern $pattern -CaseSensitive:$false
+            if ($matches) { throw "Sensitive pattern '$pattern' found: $($matches.Path -join ', ')" }
+          }

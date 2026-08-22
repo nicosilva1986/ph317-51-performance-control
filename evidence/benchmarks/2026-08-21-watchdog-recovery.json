@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "testedAt": "2026-08-21T23:25:41-03:00",
+  "scenario": "Stop only the primary controller task while the watchdog remains running",
+  "taskStopped": true,
+  "watchdogStayedRunning": true,
+  "primaryRestarted": true,
+  "healthyMaxRecovered": true,
+  "recoveryMilliseconds": 7970,
+  "final": {
+    "state": "MAX",
+    "status": "HEALTHY_VERIFIED",
+    "fanBehavior": 512,
+    "cpuFanRpm": 6122,
+    "gpuFanRpm": 6122
+  },
+  "watchdogLogEvidence": "primary_restarted",
+  "status": "PASS"
+}

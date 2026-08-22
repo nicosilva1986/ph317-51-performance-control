@@ -17,6 +17,7 @@ adaptive-fan*.jsonl
 adaptive-fan-status.json
 watchdog.jsonl
 installation-result.json
+tests/*-test-result.json
 
 # PowerShell/editor noise
 *.tmp
