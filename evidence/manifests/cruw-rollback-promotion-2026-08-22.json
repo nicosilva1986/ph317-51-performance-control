@@ -1,0 +1,94 @@
+{
+  "schemaVersion": 1,
+  "capturedAt": "2026-08-22T03:52:16.1459110-03:00",
+  "scope": "sanitized CRUWBlocker rollback-capability evidence from the reference PH317-51",
+  "package": {
+    "publishedNameAtCapture": "oem127.inf",
+    "originalInf": "cruwblocker.inf",
+    "provider": "CRU Acquisition Group, LLC",
+    "className": "DiskDrive",
+    "version": "1.2.1.1",
+    "files": [
+      {
+        "name": "cruwblocker.inf",
+        "length": 1499,
+        "sha256": "D9A075F6849EE76CD43BBA4C4FE6B27D27A5788D9A25695413E7791CCA5EBA2B",
+        "signatureStatus": "Valid",
+        "signer": "Microsoft Windows Hardware Compatibility Publisher"
+      },
+      {
+        "name": "CRUWBlocker.sys",
+        "length": 40152,
+        "sha256": "F59BE364EB9360C999C6F68218100D0A343BA8D1D67E5AC4419DD79C56A7A18C",
+        "signatureStatus": "Valid",
+        "signer": "Microsoft Windows Hardware Compatibility Publisher"
+      },
+      {
+        "name": "CRUWBlocker.cat",
+        "length": 10269,
+        "sha256": "5D8298B9C1908A84E2CD68B6AFF4EA71E9AF3F5B3C850694A74626775A4E3862",
+        "signatureStatus": "Valid",
+        "signer": "Microsoft Windows Hardware Compatibility Publisher"
+      }
+    ],
+    "containsOnlyInfSysCat": true,
+    "containsCoinstallerExtensionOrBootFlags": false
+  },
+  "infServiceInstall": {
+    "serviceName": "CRUWBlocker",
+    "serviceType": 1,
+    "startType": 3,
+    "errorControl": 1,
+    "serviceBinary": "%12%\\CRUWBlocker.sys",
+    "loadOrderGroup": "Pnp Filter"
+  },
+  "liveServiceAtCapture": {
+    "state": "Running",
+    "start": 0,
+    "type": 1,
+    "errorControl": 1,
+    "group": "Pnp Filter",
+    "imagePath": "System32\\drivers\\CRUWBlocker.sys",
+    "binaryMatchesPackageSha256": true
+  },
+  "setupApiPromotionEvidence": {
+    "diagnosticOnly": true,
+    "matchedPhrase": "Updated service 'cruwblocker' to be boot start.",
+    "totalMatches": 9,
+    "logs": [
+      {
+        "fileName": "setupapi.dev.20260213_231411.log",
+        "sha256": "081AB88483F87C47108F84D062E0BCDE1B00A9F599C81BA788156A9B8671DD72",
+        "length": 4194657,
+        "matchCount": 2,
+        "matchingLineNumbers": [28358, 28394]
+      },
+      {
+        "fileName": "setupapi.dev.20260527_053701.log",
+        "sha256": "B130CBE7C7E2AAE80F46744B918D7C215BA4C44FC717F4A1096D99D401720572",
+        "length": 5005411,
+        "matchCount": 4,
+        "matchingLineNumbers": [22204, 22240, 57818, 57854]
+      },
+      {
+        "fileName": "setupapi.dev.20260728_212402.log",
+        "sha256": "4E50167DBAA28BB9ED9FBB52310599B4F06385285B71F269593009BD1D17EDC3",
+        "length": 7014209,
+        "matchCount": 3,
+        "matchingLineNumbers": [35346, 35420, 41755]
+      }
+    ]
+  },
+  "interpretation": {
+    "historicalBootStartPromotionObserved": true,
+    "promotionAssumedFromInfAlone": false,
+    "setupApiTextUsedAsAuthorization": false,
+    "rollbackStillRequiresExactLiveLegacyState": true,
+    "requiredLiveRollbackState": "Start=0, Type=1, ErrorControl=1, Group=Pnp Filter, Running, exact signed binary and exact device/class filter bindings"
+  },
+  "privacy": {
+    "rawDeviceInstanceIdsIncluded": false,
+    "bitLockerSecretsIncluded": false,
+    "userPathsIncluded": false
+  }
+}

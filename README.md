@@ -30,7 +30,7 @@ Max redujo la máxima 12 °C, redujo el promedio 10,5 °C y mejoró el throughpu
 - **Fan controller:** un único escritor privilegiado decide `AUTO` o `MAX` con carga por núcleo, temperatura, velocidad de subida e histéresis.
 - **Watchdog fail-closed:** verifica heartbeat, estado, integridad y ejecución; una falla lleva a `MAX`, nunca a un supuesto estado saludable.
 - **Native Turbo:** usa Turbo Boost/Speed Shift de Intel y un plan Windows reproducible. No manipula voltajes ni límites eléctricos en la primera fase.
-- **Driver hygiene:** inventario, hashes, backups dobles y rebind reversible. Los binarios de terceros no se publican.
+- **Driver hygiene:** preflight schema v3, seis scripts sellados, backups dobles, journal transaccional y rebind reversible sin `/force`. La recuperación nunca repite una eliminación ambigua. Los binarios de terceros no se publican.
 - **Evidence first:** toda afirmación de rendimiento debe enlazar una carga reproducible, datos térmicos y ausencia/presencia de WHEA.
 
 Ver [uso y pruebas](docs/usage.md), [arquitectura](docs/architecture.md), [inventario inicial](docs/hardware-and-driver-baseline.md), [plan Turbo nativo](docs/native-turbo-plan.md) y [recuperación](docs/recovery-and-rollback.md).
