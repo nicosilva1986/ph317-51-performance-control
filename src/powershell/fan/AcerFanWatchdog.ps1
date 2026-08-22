@@ -6,7 +6,11 @@ param(
     [int] $HeartbeatMaximumAgeSeconds = 15,
     [ValidateRange(0, 60)]
     [int] $MaximumFutureSkewSeconds = 5,
-    [switch] $ProbeOnly
+    [switch] $ProbeOnly,
+    [ValidateRange(0, 1000)]
+    [int] $ProbePreviousPendingCount = 0,
+    [ValidateRange(0, 3600)]
+    [double] $ProbePendingElapsedSeconds = 0
 )
 
 Set-StrictMode -Version Latest
@@ -18,6 +22,7 @@ $controllerLogPath = Join-Path $Root 'adaptive-fan.jsonl'
 $controllerPath = Join-Path $Root 'AcerAdaptiveFanController.ps1'
 $configPath = Join-Path $Root 'fan-controller-config.json'
 $watchdogPath = Join-Path $Root 'AcerFanWatchdog.ps1'
+$watchdogPollSeconds = 10
 
 function Write-WatchdogEvent {
     param([string] $Event, [string] $Detail = '')
@@ -79,6 +84,13 @@ function Get-IntegrityState {
         if ($null -eq $minimumRpmProperty) { throw 'minimumMaxRpm is absent from the protected configuration.' }
         $minimumRpm = [int]$minimumRpmProperty.Value
         if ($minimumRpm -lt 1000 -or $minimumRpm -gt 10000) { throw 'minimumMaxRpm is outside its safety range.' }
+        $verifyProperty = $configuration.PSObject.Properties['verifyMaxAfterSeconds']
+        if ($null -eq $verifyProperty) { throw 'verifyMaxAfterSeconds is absent from the protected configuration.' }
+        $verifyRaw = [double]$verifyProperty.Value
+        $verifySeconds = [int]$verifyRaw
+        if ($verifyRaw -ne $verifySeconds -or $verifySeconds -lt 1 -or $verifySeconds -gt 300) {
+            throw 'verifyMaxAfterSeconds is outside its safety range.'
+        }
         $result.valid = $true
         $result.detail = 'OK'
         $result.config = $configuration
@@ -89,10 +101,41 @@ function Get-IntegrityState {
     return [pscustomobject]$result
 }
 
+function Get-RequiredUnsignedInteger {
+    param(
+        [Parameter(Mandatory)] $InputObject,
+        [Parameter(Mandatory)] [string] $Name,
+        [Parameter(Mandatory)] [uint64] $Maximum
+    )
+
+    $property = $InputObject.PSObject.Properties[$Name]
+    if ($null -eq $property -or $null -eq $property.Value -or $property.Value -is [bool]) {
+        throw "Primary heartbeat has invalid unsigned integer: $Name"
+    }
+
+    $value = $property.Value
+    $typeCode = [Type]::GetTypeCode($value.GetType())
+    $signedTypes = @([TypeCode]::SByte, [TypeCode]::Int16, [TypeCode]::Int32, [TypeCode]::Int64)
+    $unsignedTypes = @([TypeCode]::Byte, [TypeCode]::UInt16, [TypeCode]::UInt32, [TypeCode]::UInt64)
+    if ($typeCode -in $signedTypes) {
+        $signedValue = [int64]$value
+        if ($signedValue -lt 0) { throw "Primary heartbeat has invalid unsigned integer: $Name" }
+        $parsed = [uint64]$signedValue
+    }
+    elseif ($typeCode -in $unsignedTypes) {
+        $parsed = [uint64]$value
+    }
+    else {
+        throw "Primary heartbeat has invalid unsigned integer: $Name"
+    }
+    if ($parsed -gt $Maximum) { throw "Primary heartbeat has out-of-range unsigned integer: $Name" }
+    return $parsed
+}
+
 function Get-PrimaryStatusHealth {
     param([Parameter(Mandatory)] $Configuration)
 
-    $result = [ordered]@{ valid = $false; detail = ''; status = $null; ageSeconds = $null }
+    $result = [ordered]@{ valid = $false; disposition = 'FATAL'; detail = ''; status = $null; ageSeconds = $null }
     try {
         if (-not (Test-Path -LiteralPath $statusPath -PathType Leaf)) { throw 'Primary heartbeat is missing.' }
         $status = Get-Content -LiteralPath $statusPath -Raw | ConvertFrom-Json
@@ -107,32 +150,75 @@ function Get-PrimaryStatusHealth {
         $result.ageSeconds = [math]::Round($ageSeconds, 3)
         if ($ageSeconds -gt $HeartbeatMaximumAgeSeconds) { throw "Primary heartbeat is stale by $([math]::Round($ageSeconds,1)) seconds." }
         if ($ageSeconds -lt -$MaximumFutureSkewSeconds) { throw "Primary heartbeat is $([math]::Round(-$ageSeconds,1)) seconds in the future." }
-        if ([string]$status.status -ne 'HEALTHY_VERIFIED') { throw "Primary health code is $([string]$status.status)." }
-
         $state = [string]$status.state
         if ($state -notin @('AUTO', 'MAX')) { throw "Primary state is invalid: $state" }
-        $mode = ([uint32]$status.fanBehaviorBitmap -shr 8) -band 3
+        $behaviorBitmap = [uint32](Get-RequiredUnsignedInteger -InputObject $status -Name 'fanBehaviorBitmap' -Maximum ([uint32]::MaxValue))
+        $mode = ($behaviorBitmap -shr 8) -band 3
+        $healthCode = [string]$status.status
+        $result.status = $status
+        if ($healthCode -eq 'REASSERT_PENDING') {
+            if ($state -ne 'MAX') {
+                throw 'REASSERT_PENDING is transient only while the primary state is MAX.'
+            }
+            foreach ($name in @('cpuFanRpm', 'gpuFanRpm')) {
+                [void](Get-RequiredUnsignedInteger -InputObject $status -Name $name -Maximum ([int32]::MaxValue))
+            }
+            $result.disposition = 'REASSERT_PENDING'
+            $result.detail = "Primary $state transition is awaiting verified mode/RPM; observed mode $mode."
+            return [pscustomobject]$result
+        }
+        if ($healthCode -ne 'HEALTHY_VERIFIED') { throw "Primary health code is $healthCode." }
+
         if ($state -eq 'AUTO') {
             if ($mode -ne 1) { throw "AUTO state does not match firmware mode $mode." }
         }
         else {
-            foreach ($name in @('cpuFanRpm', 'gpuFanRpm')) {
-                if ($null -eq $status.PSObject.Properties[$name]) { throw "MAX heartbeat property is missing: $name" }
-            }
+            $cpuFanRpm = Get-RequiredUnsignedInteger -InputObject $status -Name 'cpuFanRpm' -Maximum ([int32]::MaxValue)
+            $gpuFanRpm = Get-RequiredUnsignedInteger -InputObject $status -Name 'gpuFanRpm' -Maximum ([int32]::MaxValue)
             if ($mode -ne 2) { throw "MAX state does not match firmware mode $mode." }
             $minimumRpm = [int]$Configuration.minimumMaxRpm
-            if ([int]$status.cpuFanRpm -lt $minimumRpm -or [int]$status.gpuFanRpm -lt $minimumRpm) {
+            if ($cpuFanRpm -lt $minimumRpm -or $gpuFanRpm -lt $minimumRpm) {
                 throw "MAX fan RPM is below $minimumRpm."
             }
         }
         $result.valid = $true
+        $result.disposition = 'HEALTHY_VERIFIED'
         $result.detail = 'OK'
-        $result.status = $status
     }
     catch {
         $result.detail = $_.Exception.Message
     }
     return [pscustomobject]$result
+}
+
+function Get-HeartbeatRecoveryDecision {
+    param(
+        [Parameter(Mandatory)]
+        [ValidateSet('HEALTHY_VERIFIED', 'REASSERT_PENDING', 'FATAL')]
+        [string] $Disposition,
+        [ValidateRange(0, 1000)]
+        [int] $PreviousPendingCount,
+        [ValidateRange(0, 3600)]
+        [double] $PendingElapsedSeconds,
+        [ValidateRange(1, 300)]
+        [int] $VerifyMaxAfterSeconds
+    )
+
+    if ($Disposition -eq 'HEALTHY_VERIFIED') {
+        return [pscustomobject]@{ action = 'NONE'; nextPendingCount = 0; resetWindow = $true }
+    }
+    if ($Disposition -eq 'FATAL') {
+        return [pscustomobject]@{ action = 'QUIESCE_MAX_RESTART'; nextPendingCount = 0; resetWindow = $true }
+    }
+
+    $nextCount = $PreviousPendingCount + 1
+    $action = if ($nextCount -ge 2 -and $PendingElapsedSeconds -ge $VerifyMaxAfterSeconds) {
+        'QUIESCE_MAX_RESTART'
+    }
+    else {
+        'WAIT_PRIMARY'
+    }
+    return [pscustomobject]@{ action = $action; nextPendingCount = $nextCount; resetWindow = $false }
 }
 
 function Test-PrimaryTaskDefinition {
@@ -164,32 +250,133 @@ function Register-TrustedPrimaryTask {
     Register-ScheduledTask -TaskName $PrimaryTaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description 'Authoritative adaptive Acer PH317-51 fan control.' -Force | Out-Null
 }
 
-function Invoke-EmergencyRecovery {
-    param([string] $Reason)
-    $maxError = ''
-    try { Set-EmergencyMax } catch { $maxError = $_.Exception.Message }
-
+function Stop-PrimaryAndAcquireControllerLease {
     $task = $null
     try { $task = Get-ScheduledTask -TaskName $PrimaryTaskName -ErrorAction SilentlyContinue } catch { }
+    if ($task -and $task.State -eq 'Running') { Stop-ScheduledTask -TaskName $PrimaryTaskName }
+
+    $lease = [Threading.Mutex]::new($false, 'Global\AcerAdaptiveFanController')
     try {
-        if ($task -and $task.State -eq 'Running') { Stop-ScheduledTask -TaskName $PrimaryTaskName }
-        if (-not $task -or -not (Test-PrimaryTaskDefinition -Task $task)) {
-            Register-TrustedPrimaryTask
+        $acquired = $false
+        try { $acquired = $lease.WaitOne(5000) }
+        catch [Threading.AbandonedMutexException] { $acquired = $true }
+        if (-not $acquired) {
+            throw 'Timed out waiting for the primary controller write lease after stopping its task.'
         }
-        Start-ScheduledTask -TaskName $PrimaryTaskName
+        return $lease
     }
     catch {
-        $restartError = $_.Exception.Message
-        Write-WatchdogEvent 'primary_recovery_error' "$Reason; MAX error: $maxError; restart error: $restartError"
-        return
+        $lease.Dispose()
+        throw
     }
-    Write-WatchdogEvent 'primary_restarted' "$Reason; MAX error: $maxError"
+}
+
+function Release-ControllerLease {
+    param([Parameter(Mandatory)] [Threading.Mutex] $Lease)
+    try { $Lease.ReleaseMutex() }
+    finally { $Lease.Dispose() }
+}
+
+function Start-TrustedPrimaryTask {
+    $task = $null
+    try { $task = Get-ScheduledTask -TaskName $PrimaryTaskName -ErrorAction SilentlyContinue } catch { }
+    if (-not $task -or -not (Test-PrimaryTaskDefinition -Task $task)) {
+        Register-TrustedPrimaryTask
+    }
+    Start-ScheduledTask -TaskName $PrimaryTaskName
+
+    $startClock = [Diagnostics.Stopwatch]::StartNew()
+    $runningObservations = 0
+    do {
+        Start-Sleep -Milliseconds 100
+        $task = Get-ScheduledTask -TaskName $PrimaryTaskName -ErrorAction SilentlyContinue
+        if ($task -and $task.State -eq 'Running') {
+            $runningObservations++
+            if ($runningObservations -ge 5) { return }
+        }
+        else {
+            $runningObservations = 0
+        }
+    } while ($startClock.Elapsed.TotalSeconds -lt 5)
+    throw 'Primary task did not reach Running state after restart.'
+}
+
+function Invoke-WatchdogRecoveryAction {
+    param(
+        [Parameter(Mandatory)]
+        [ValidateSet('WAIT_PRIMARY', 'QUIESCE_MAX', 'QUIESCE_MAX_RESTART')]
+        [string] $Action,
+        [Parameter(Mandatory)] [string] $Reason,
+        [Parameter(Mandatory)] [scriptblock] $StopPrimary,
+        [Parameter(Mandatory)] [scriptblock] $RequestMax,
+        [Parameter(Mandatory)] [scriptblock] $ReleasePrimary,
+        [Parameter(Mandatory)] [scriptblock] $StartPrimary
+    )
+
+    if ($Action -eq 'WAIT_PRIMARY') {
+        return [pscustomobject]@{ outcome = 'PRIMARY_REMAINS_AUTHORITATIVE'; resetPending = $false; detail = 'No watchdog write was dispatched.' }
+    }
+
+    $lease = $null
+    try {
+        $lease = & $StopPrimary
+    }
+    catch {
+        return [pscustomobject]@{ outcome = 'RECOVERY_FAILED'; resetPending = $false; detail = "STOP failed: $($_.Exception.Message)" }
+    }
+
+    $maxError = ''
+    try { & $RequestMax | Out-Null } catch { $maxError = $_.Exception.Message }
+
+    $releaseError = ''
+    try { & $ReleasePrimary $lease | Out-Null } catch { $releaseError = $_.Exception.Message }
+
+    $startError = ''
+    if ($Action -eq 'QUIESCE_MAX_RESTART' -and [string]::IsNullOrWhiteSpace($releaseError)) {
+        try { & $StartPrimary | Out-Null } catch { $startError = $_.Exception.Message }
+    }
+
+    if ([string]::IsNullOrWhiteSpace($maxError) -and [string]::IsNullOrWhiteSpace($releaseError) -and
+        [string]::IsNullOrWhiteSpace($startError)) {
+        $outcome = if ($Action -eq 'QUIESCE_MAX_RESTART') { 'PRIMARY_RESTARTED' } else { 'MAX_HELD_WITH_PRIMARY_STOPPED' }
+        return [pscustomobject]@{ outcome = $outcome; resetPending = $true; detail = 'OK' }
+    }
+
+    $detail = "$Reason; MAX error: $maxError; release error: $releaseError; start error: $startError"
+    return [pscustomobject]@{ outcome = 'RECOVERY_FAILED'; resetPending = $false; detail = $detail }
+}
+
+function Invoke-EmergencyRecovery {
+    param([string] $Reason)
+    $result = Invoke-WatchdogRecoveryAction -Action 'QUIESCE_MAX_RESTART' -Reason $Reason `
+        -StopPrimary { Stop-PrimaryAndAcquireControllerLease } -RequestMax { Set-EmergencyMax } `
+        -ReleasePrimary { param($lease) Release-ControllerLease -Lease $lease } -StartPrimary { Start-TrustedPrimaryTask }
+    if ($result.outcome -eq 'PRIMARY_RESTARTED') {
+        Write-WatchdogEvent 'primary_restarted' $Reason
+    }
+    else {
+        Write-WatchdogEvent 'primary_recovery_error' $result.detail
+    }
+    return $result
 }
 
 $integrityState = Get-IntegrityState
 if ($ProbeOnly) {
-    $health = if ($integrityState.valid) { Get-PrimaryStatusHealth -Configuration $integrityState.config } else { [pscustomobject]@{ valid = $false; detail = 'Integrity invalid; status not trusted.'; status = $null; ageSeconds = $null } }
-    [ordered]@{ integrity = $integrityState; health = $health } | ConvertTo-Json -Depth 8
+    $health = if ($integrityState.valid) {
+        Get-PrimaryStatusHealth -Configuration $integrityState.config
+    }
+    else {
+        [pscustomobject]@{ valid = $false; disposition = 'FATAL'; detail = 'Integrity invalid; status not trusted.'; status = $null; ageSeconds = $null }
+    }
+    $verifySeconds = if ($integrityState.valid) { [int]$integrityState.config.verifyMaxAfterSeconds } else { 1 }
+    $decision = if ($integrityState.valid) {
+        Get-HeartbeatRecoveryDecision -Disposition $health.disposition -PreviousPendingCount $ProbePreviousPendingCount `
+            -PendingElapsedSeconds $ProbePendingElapsedSeconds -VerifyMaxAfterSeconds $verifySeconds
+    }
+    else {
+        [pscustomobject]@{ action = 'QUIESCE_MAX'; nextPendingCount = 0; resetWindow = $true }
+    }
+    [ordered]@{ integrity = $integrityState; health = $health; decision = $decision; verifyMaxAfterSeconds = $verifySeconds } | ConvertTo-Json -Depth 8
     if ($integrityState.valid -and $health.valid) { exit 0 }
     exit 1
 }
@@ -200,14 +387,18 @@ if (-not $createdNew) { exit 0 }
 
 try {
     Write-WatchdogEvent 'watchdog_started'
+    $pendingCount = 0
+    $pendingClock = [Diagnostics.Stopwatch]::new()
     while ($true) {
         try {
             $integrityState = Get-IntegrityState
             if (-not $integrityState.valid) {
-                $maxError = ''
-                try { Set-EmergencyMax } catch { $maxError = $_.Exception.Message }
-                try { Stop-ScheduledTask -TaskName $PrimaryTaskName -ErrorAction SilentlyContinue } catch { }
-                Write-WatchdogEvent 'integrity_failure_max_left_active' "$($integrityState.detail); MAX error: $maxError"
+                $pendingCount = 0
+                $pendingClock.Reset()
+                $integrityDispatch = Invoke-WatchdogRecoveryAction -Action 'QUIESCE_MAX' -Reason $integrityState.detail `
+                    -StopPrimary { Stop-PrimaryAndAcquireControllerLease } -RequestMax { Set-EmergencyMax } `
+                    -ReleasePrimary { param($lease) Release-ControllerLease -Lease $lease } -StartPrimary { Start-TrustedPrimaryTask }
+                Write-WatchdogEvent 'integrity_failure_max_left_active' "$($integrityState.detail); outcome=$($integrityDispatch.outcome); $($integrityDispatch.detail)"
                 Start-Sleep -Seconds 20
                 continue
             }
@@ -216,19 +407,59 @@ try {
             $health = Get-PrimaryStatusHealth -Configuration $integrityState.config
             $taskDefinitionValid = $task -and (Test-PrimaryTaskDefinition -Task $task)
             if ($task -and -not $taskDefinitionValid) {
-                Invoke-EmergencyRecovery -Reason 'Primary task definition was altered.'
-                continue
+                $pendingCount = 0
+                $pendingClock.Reset()
+                [void](Invoke-EmergencyRecovery -Reason 'Primary task definition was altered.')
             }
-            $taskHealthy = $taskDefinitionValid -and $task.State -eq 'Running'
-            if (-not $taskHealthy -or -not $health.valid) {
+            else {
+                $taskHealthy = $taskDefinitionValid -and $task.State -eq 'Running'
                 $taskState = if ($task) { [string]$task.State } else { 'MISSING' }
-                Invoke-EmergencyRecovery -Reason "Task state: $taskState; task definition valid: $taskDefinitionValid; heartbeat: $($health.detail)"
+                if (-not $taskHealthy) {
+                    $pendingCount = 0
+                    $pendingClock.Reset()
+                    [void](Invoke-EmergencyRecovery -Reason "Task state: $taskState; task definition valid: $taskDefinitionValid; heartbeat: $($health.detail)")
+                }
+                elseif ($health.disposition -eq 'REASSERT_PENDING') {
+                    if ($pendingCount -eq 0) { $pendingClock.Restart() }
+                    $pendingElapsed = $pendingClock.Elapsed.TotalSeconds
+                    $decision = Get-HeartbeatRecoveryDecision -Disposition $health.disposition -PreviousPendingCount $pendingCount `
+                        -PendingElapsedSeconds $pendingElapsed -VerifyMaxAfterSeconds ([int]$integrityState.config.verifyMaxAfterSeconds)
+                    $pendingCount = [int]$decision.nextPendingCount
+                    if ($decision.action -eq 'WAIT_PRIMARY') {
+                        $dispatch = Invoke-WatchdogRecoveryAction -Action $decision.action -Reason 'Primary MAX verification grace.' `
+                            -StopPrimary { Stop-PrimaryAndAcquireControllerLease } -RequestMax { Set-EmergencyMax } `
+                            -ReleasePrimary { param($lease) Release-ControllerLease -Lease $lease } -StartPrimary { Start-TrustedPrimaryTask }
+                        Write-WatchdogEvent 'reassert_pending_primary_observing' "count=$pendingCount; elapsedSeconds=$([math]::Round($pendingElapsed,1)); verifySeconds=$([int]$integrityState.config.verifyMaxAfterSeconds); outcome=$($dispatch.outcome)"
+                    }
+                    else {
+                        Write-WatchdogEvent 'reassert_pending_restart_threshold' "count=$pendingCount; elapsedSeconds=$([math]::Round($pendingElapsed,1)); verifySeconds=$([int]$integrityState.config.verifyMaxAfterSeconds)"
+                        $dispatch = Invoke-EmergencyRecovery -Reason "Persistent heartbeat: $($health.detail)"
+                        if ($dispatch.resetPending) {
+                            $pendingCount = 0
+                            $pendingClock.Reset()
+                        }
+                    }
+                }
+                elseif ($health.disposition -eq 'HEALTHY_VERIFIED') {
+                    if ($pendingCount -gt 0) {
+                        Write-WatchdogEvent 'reassert_pending_cleared' "count=$pendingCount; elapsedSeconds=$([math]::Round($pendingClock.Elapsed.TotalSeconds,1))"
+                    }
+                    $pendingCount = 0
+                    $pendingClock.Reset()
+                }
+                else {
+                    $pendingCount = 0
+                    $pendingClock.Reset()
+                    [void](Invoke-EmergencyRecovery -Reason "Task state: $taskState; task definition valid: $taskDefinitionValid; heartbeat: $($health.detail)")
+                }
             }
         }
         catch {
-            Invoke-EmergencyRecovery -Reason "Unhandled watchdog loop error: $($_.Exception.Message)"
+            $pendingCount = 0
+            $pendingClock.Reset()
+            [void](Invoke-EmergencyRecovery -Reason "Unhandled watchdog loop error: $($_.Exception.Message)")
         }
-        Start-Sleep -Seconds 10
+        Start-Sleep -Seconds $watchdogPollSeconds
     }
 }
 finally {

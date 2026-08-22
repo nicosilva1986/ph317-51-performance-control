@@ -61,6 +61,10 @@ jobs:
         shell: pwsh
         run: .\tests\Test-AcerFanWatchdog.ps1
 
+      - name: Watchdog fail-closed probes — Windows PowerShell 5.1
+        shell: powershell
+        run: .\tests\Test-AcerFanWatchdog.ps1
+
       - name: CRUWBlocker preflight invariant tests
         shell: pwsh
         run: .\tests\Test-CRUWBlockerPreflightCore.ps1
