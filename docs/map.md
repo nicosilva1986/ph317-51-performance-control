@@ -45,6 +45,7 @@ Read order for humans. Implementation details live in the linked files.
 | [research/README.md](../research/README.md) | Index |
 | [research/platform-thermal-context.md](../research/platform-thermal-context.md) | Micro vs Acer |
 | [research/cross-vendor-control-landscape.md](../research/cross-vendor-control-landscape.md) | Multi-vendor control methods |
+| [research/gpu-thermal-and-undervolt.md](../research/gpu-thermal-and-undervolt.md) | GTX 1060 heat, UV/PL, non-goals |
 | [research/forum-sources.md](../research/forum-sources.md) | Multi-language sources |
 | [research/repo-health-2026-08-22.md](../research/repo-health-2026-08-22.md) | Navigability / health snapshot |
 | [research/log.md](../research/log.md) | Append-only research log |

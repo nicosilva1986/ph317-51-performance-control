@@ -7,6 +7,7 @@ the wider PH317-51 / Helios 300 ecosystem reported. Not runtime code.
 |----------|---------|
 | [platform-thermal-context.md](platform-thermal-context.md) | Root cause: micro vs Acer platform vs software layers |
 | [cross-vendor-control-landscape.md](cross-vendor-control-landscape.md) | How ASUS/Lenovo/MSI/NBFC/etc. control fans and power; what to borrow |
+| [gpu-thermal-and-undervolt.md](gpu-thermal-and-undervolt.md) | GTX 1060 heat role, Afterburner UV/PL, what improves, non-goals |
 | [forum-sources.md](forum-sources.md) | Curated forum/review links (multi-language) |
 | [repo-health-2026-08-22.md](repo-health-2026-08-22.md) | Point-in-time health and navigability of this repository |
 | [log.md](log.md) | Chronological research log (append-only) |
@@ -25,4 +26,5 @@ the wider PH317-51 / Helios 300 ecosystem reported. Not runtime code.
 - [docs/architecture.md](../docs/architecture.md)
 - [docs/native-turbo-plan.md](../docs/native-turbo-plan.md)
 - [docs/roadmap-next-controls.md](../docs/roadmap-next-controls.md)
+- [docs/limit-telemetry-proposal.md](../docs/limit-telemetry-proposal.md)
 - [evidence/benchmarks](../evidence/benchmarks/)

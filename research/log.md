@@ -2,6 +2,13 @@
 
 Append-only. Newest entries at the top.
 
+## 2026-08-22 — GPU thermal role and undervolt
+
+- Question: is there a ThrottleStop-like path for the GTX 1060, and what does UV improve?
+- Conclusion: Afterburner V/F curve + power limit are the community tools; goal is same/stable FPS at lower watts/heat; shared heatpipes can cool CPU indirectly under gaming. Not for SYSTEM fan stack.
+- Local evidence still CPU-FMA-only; need 3D workload telemetry before claiming GPU is the dominant heat source on this unit.
+- Captured in `gpu-thermal-and-undervolt.md`. Tracker issue opened for evidence + optional operator UV posture.
+
 ## 2026-08-22 — Cross-vendor control landscape
 
 - Question: CPU/GPU behaviour and solutions on other brands; are we missing an approach?
