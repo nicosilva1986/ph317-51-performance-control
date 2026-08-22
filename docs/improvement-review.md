@@ -8,6 +8,30 @@ Findings are ranked by the cost of leaving them alone. Every claim below cites
 the exact file and line it came from; nothing here was inferred from a
 description or a commit message.
 
+## Relationship to the roadmap
+
+[`roadmap-next-controls.md`](roadmap-next-controls.md) landed independently and
+covers the *forward* work: limit telemetry (A), the Custom % matrix (B), binary
+policy tuning (C), CoolBoost (D), resume/AC–DC (E), GPU-first policy (F). Two
+findings here were reached independently and are already tracked there — **S4**
+is workstream E, and **S7** is workstream B, whose candidate word `0x00C30009`
+this review independently confirms against mainline (`SET_CPU_MODE_MASK`
+`GENMASK(17, 16)` with value 3 = `0x00030000`; `SET_GPU_MODE_MASK`
+`GENMASK(23, 22)` with value 3 = `0x00C00000`). Those two sections are kept for
+the supporting evidence, not as competing proposals.
+
+The remaining eight findings are **not** on the roadmap, and three of them are
+defects in code that is already in the hot path. That is the gap this document
+is for: the roadmap plans new capability on top of a controller that has an
+untested restart loop (S1), a decode inconsistency (S2), and no way to
+regression-test either (S3).
+
+One dependency worth making explicit: workstream B's own implementation sketch
+requires "extend simulation tests with Custom transitions before live install".
+That is **not possible today** — the simulation harness cannot reach any
+readback or mode-transition path (see S3). **S3 is a prerequisite for
+workstream B**, not a parallel cleanup.
+
 ## What the review confirmed as correct
 
 Worth stating first, because it constrains the rest of the recommendations.
@@ -224,7 +248,8 @@ adapter.
 
 ## S4 — No re-assertion on resume from sleep
 
-**Severity: medium.**
+**Severity: medium. Tracked as roadmap workstream E — this section is the
+supporting evidence for it, including a second failure mode E does not mention.**
 
 [`architecture.md`](architecture.md) draws the component diagram as
 `Windows startup/resume`, but both task registrations use a startup trigger only:
@@ -331,7 +356,10 @@ no indication of *which* file failed. Correct form is `$($_.FullName)`.
 
 ## S7 — Fan policy is binary when the firmware exposes three modes
 
-**Severity: medium. This revisits a documented non-goal deliberately.**
+**Severity: medium. Tracked as roadmap workstream B
+([`fan-curve-experiment.md`](fan-curve-experiment.md)), which already specifies
+the matrix protocol and pass/fail criteria. This section records the independent
+motivation and the upstream cross-check; it does not propose a second design.**
 
 Current thresholds (`fan-controller-config.json`):
 
@@ -372,6 +400,15 @@ Prerequisite before implementing: confirm on hardware that mode `3` performs a
 live percent write on this firmware rather than replaying the last
 PredatorSense-saved curve — `wmi-surface.md` already flags that ambiguity for
 tray apps and it must be resolved with a readback, not an assumption.
+[`fan-curve-experiment.md`](fan-curve-experiment.md) is that measurement, and
+its "firmware ignores Custom and stays Auto" fail criterion is exactly the
+ambiguity to resolve. Two things this review adds to it:
+
+- its candidate word `0x00C30009` checks out against mainline — worth recording
+  in the experiment doc that the encoding was verified against
+  `acer-wmi.c`, not only derived from `wmi-surface.md`;
+- its implementation sketch calls for simulation coverage of Custom transitions,
+  which S3 must land first to make possible.
 
 ---
 
@@ -466,25 +503,29 @@ tuned upward from 0 to satisfy the thermal criterion, so a failed run reads as
 
 ## Suggested order of work
 
-| # | Item | Effort | Risk | Touches pinned hashes |
-|---|---|---|---|---|
-| 1 | S6 CI filename interpolation | trivial | none | no |
-| 2 | S1 watchdog restart debounce + test | small | low | **yes** (watchdog) |
-| 3 | S2 masked GPU/CPU mode decode | small | low | **yes** (controller) |
-| 4 | S3 fan adapter injection + simulation coverage | medium | medium | **yes** (controller) |
-| 5 | S8 LICENSE | trivial | none | no |
-| 6 | S9 PSScriptAnalyzer + strict-mode sweep + CI polish | small | none | no |
-| 7 | S4 resume measurement, then resume trigger | medium | medium | **yes** |
-| 8 | S5 document external-override precedence | trivial | none | no |
-| 9 | S7 three-tier fan policy | large | medium | **yes** |
-| 10 | S10 module extraction (schema v4) | large | high | **yes** (sealed bundle) |
+This is a *defect* queue and runs alongside the roadmap's capability queue, not
+instead of it. Where the two touch, the dependency is noted.
 
-Items 2, 3, 4 and 7 change privileged control logic. Per `AGENTS.md` each needs
-isolated simulations for every affected trigger and failure path, and each
-requires re-pinning the SHA-256 values in
-`Deploy-SecureAcerFanUpdate.ps1:12-17` — S3 should land before or with S1/S2 so
-those fixes can actually be covered by a deterministic test rather than only by
-a hardware run.
+| # | Item | Effort | Risk | Pinned hashes | Roadmap link |
+|---|---|---|---|---|---|
+| 1 | S6 CI filename interpolation | trivial | none | no | — |
+| 2 | S8 LICENSE | trivial | none | no | — |
+| 3 | S5 document external-override precedence | trivial | none | no | — |
+| 4 | S3 fan adapter injection + simulation coverage | medium | medium | **yes** (controller) | **blocks B** |
+| 5 | S1 watchdog restart debounce + test | small | low | **yes** (watchdog) | — |
+| 6 | S2 masked GPU/CPU mode decode | small | low | **yes** (controller) | — |
+| 7 | S9 PSScriptAnalyzer + strict-mode sweep + CI polish | small | none | no | — |
+| 8 | S4 resume measurement, then resume trigger | medium | medium | **yes** | = E |
+| 9 | S7 graduated fan policy | large | medium | **yes** | = B |
+| 10 | S10 module extraction (schema v4) | large | high | **yes** (sealed bundle) | — |
+
+S3 is deliberately ahead of S1 and S2 here even though it is the larger job: it
+is what lets those two fixes be covered by a deterministic cross-engine test
+instead of only by a hardware run, and the roadmap's workstream B needs it too.
+
+Items 4, 5, 6, 8 and 9 change privileged control logic. Per `AGENTS.md` each
+needs isolated simulations for every affected trigger and failure path, and each
+requires re-pinning the SHA-256 values in `Deploy-SecureAcerFanUpdate.ps1:12-17`.
 
 ## Sources
 
