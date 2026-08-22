@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "capturedAt": "2026-08-21",
+  "platform": "Acer Predator PH317-51",
+  "osBuild": "26200",
+  "bios": "V1.22",
+  "presentPnpDevices": 223,
+  "pnpDevicesInError": 0,
+  "microsoftUpdatePendingCompatibleDrivers": 0,
+  "retained": [
+    {"device": "Intel HD Graphics 630", "version": "31.0.101.2141"},
+    {"device": "NVIDIA GeForce GTX 1060", "version": "582.66"},
+    {"device": "Realtek GbE", "version": "10.80.50.407"},
+    {"device": "Qualcomm QCA61x4A Wi-Fi/Bluetooth", "version": "12.0.0.1272"},
+    {"device": "Realtek HDA/SST", "version": "6.0.9273.1"},
+    {"device": "Micron NVMe", "version": "2.1.19.0"}
+  ],
+  "incorrectBindings": [
+    {"publishedName": "oem127.inf", "provider": "CRU Acquisition Group, LLC", "version": "1.2.1.1", "role": "BOOT_START lower filter on both internal disks", "target": "Microsoft disk.inf", "status": "pending controlled maintenance"},
+    {"publishedName": "oem129.inf", "provider": "Microsoft Surface", "version": "1.2.20", "role": "ACPI battery binding", "target": "Microsoft cmbatt.inf", "status": "pending separate validation"},
+    {"publishedName": "oem164.inf", "provider": "Alps/Lenovo", "version": "1.0.0.2", "role": "internal keyboard filter", "target": "Microsoft/OEM compatible keyboard stack", "status": "pending physical validation"}
+  ],
+  "thirdPartyBinariesIncluded": false,
+  "deviceInstanceIdsIncluded": false,
+  "secretsIncluded": false
+}

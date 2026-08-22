@@ -1,0 +1,26 @@
+# Local evidence can contain device identifiers, usernames, or recovery material.
+private/
+local/
+*.hiv
+*.etl
+*.dmp
+*.zip
+*.exe
+*.msi
+*.sys
+*.cat
+*.cab
+*.log
+
+# Runtime outputs
+adaptive-fan*.jsonl
+adaptive-fan-status.json
+watchdog.jsonl
+installation-result.json
+
+# PowerShell/editor noise
+*.tmp
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini

@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "createdAt": "2026-08-21T22:17:00-03:00",
+  "platform": "Acer Predator PH317-51 / Intel Core i7-7700HQ",
+  "workload": "NumPy 2.5.1 OpenBLAS Haswell AVX2/FMA 6144x6144 float64 matrix multiplication, 8 threads, 10 minutes",
+  "fixedCpuProfile": "28x multiplier cap",
+  "autoFans": {
+    "maxTempC": 91.0,
+    "averageTempC": 86.8,
+    "p95TempC": 90,
+    "iterations": 153,
+    "iterationSecondsAverage": 3.935,
+    "wheaEvents": 0
+  },
+  "maxFans": {
+    "backend": "AcerGamingFunction WMI/ACPI",
+    "cpuFanRpm": 6122,
+    "gpuFanRpm": 6122,
+    "maxTempC": 79.0,
+    "averageTempC": 76.3,
+    "p95TempC": 79,
+    "iterations": 166,
+    "iterationSecondsAverage": 3.635,
+    "maxPackagePowerW": 31.7,
+    "wheaEvents": 0
+  },
+  "improvement": {
+    "maxTempC": -12.0,
+    "averageTempC": -10.5,
+    "p95TempC": -11,
+    "iterations": 13,
+    "iterationsPercent": 8.5,
+    "averageIterationTimePercent": -7.6
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "testedAt": "2026-08-21T22:47:15-03:00",
+  "scenario": "Force firmware Auto while controller desires Max",
+  "before": {
+    "fanBehavior": 512,
+    "cpuFanRpm": 6122,
+    "gpuFanRpm": 6122
+  },
+  "forcedAutoReadback": {
+    "fanBehavior": 256,
+    "cpuFanRpm": 5882,
+    "gpuFanRpm": 5882
+  },
+  "recovered": true,
+  "recoveryMilliseconds": 5816,
+  "final": {
+    "fanBehavior": 512,
+    "cpuFanRpm": 5660,
+    "gpuFanRpm": 5660
+  },
+  "status": "PASS"
+}
