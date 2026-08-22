@@ -62,29 +62,52 @@ try {
     Invoke-Expression $dispatchAst.Extent.Text
 
     $dispatchTrace = [Collections.Generic.List[string]]::new()
-    $dispatch = Invoke-WatchdogRecoveryAction -Action MAX_ONLY -Reason 'test first pending' `
-        -RequestMax { [void]$dispatchTrace.Add('MAX') } -RestartPrimary { param($reason) [void]$dispatchTrace.Add('RESTART') }
-    if (($dispatchTrace -join ',') -ne 'MAX' -or $dispatch.outcome -ne 'MAX_REQUESTED' -or $dispatch.resetPending) {
-        throw 'First pending dispatch did not request MAX exactly once without restart.'
+    $dispatch = Invoke-WatchdogRecoveryAction -Action WAIT_PRIMARY -Reason 'test first pending' `
+        -StopPrimary { [void]$dispatchTrace.Add('STOP'); 'lease' } -RequestMax { [void]$dispatchTrace.Add('MAX') } `
+        -ReleasePrimary { param($lease) [void]$dispatchTrace.Add('RELEASE') } -StartPrimary { [void]$dispatchTrace.Add('START') }
+    if ($dispatchTrace.Count -ne 0 -or $dispatch.outcome -ne 'PRIMARY_REMAINS_AUTHORITATIVE' -or $dispatch.resetPending) {
+        throw 'First pending dispatch did not leave the primary as the only privileged writer.'
     }
-    $cases.Add([ordered]@{ name = 'first-pending-dispatches-max-only'; status = 'PASS' })
+    $cases.Add([ordered]@{ name = 'first-pending-leaves-primary-authoritative'; status = 'PASS' })
 
     $dispatchTrace.Clear()
-    $dispatch = Invoke-WatchdogRecoveryAction -Action MAX_ONLY -Reason 'test MAX failure' `
+    $dispatch = Invoke-WatchdogRecoveryAction -Action QUIESCE_MAX_RESTART -Reason 'test threshold' `
+        -StopPrimary { [void]$dispatchTrace.Add('STOP'); 'lease' } -RequestMax { [void]$dispatchTrace.Add('MAX') } `
+        -ReleasePrimary { param($lease) [void]$dispatchTrace.Add('RELEASE') } -StartPrimary { [void]$dispatchTrace.Add('START') }
+    if (($dispatchTrace -join ',') -ne 'STOP,MAX,RELEASE,START' -or $dispatch.outcome -ne 'PRIMARY_RESTARTED' -or -not $dispatch.resetPending) {
+        throw 'Restart threshold did not quiesce the primary before MAX and then restart it.'
+    }
+    $cases.Add([ordered]@{ name = 'restart-threshold-dispatches-stop-max-start'; status = 'PASS' })
+
+    $dispatchTrace.Clear()
+    $dispatch = Invoke-WatchdogRecoveryAction -Action QUIESCE_MAX_RESTART -Reason 'test STOP failure' `
+        -StopPrimary { [void]$dispatchTrace.Add('STOP'); throw 'simulated STOP failure' } `
+        -RequestMax { [void]$dispatchTrace.Add('MAX') } `
+        -ReleasePrimary { param($lease) [void]$dispatchTrace.Add('RELEASE') } -StartPrimary { [void]$dispatchTrace.Add('START') }
+    if (($dispatchTrace -join ',') -ne 'STOP' -or $dispatch.outcome -ne 'RECOVERY_FAILED' -or $dispatch.resetPending) {
+        throw 'STOP failure permitted a concurrent watchdog write or reported success.'
+    }
+    $cases.Add([ordered]@{ name = 'stop-failure-prevents-watchdog-write'; status = 'PASS' })
+
+    $dispatchTrace.Clear()
+    $dispatch = Invoke-WatchdogRecoveryAction -Action QUIESCE_MAX_RESTART -Reason 'test MAX failure' `
+        -StopPrimary { [void]$dispatchTrace.Add('STOP'); 'lease' } `
         -RequestMax { [void]$dispatchTrace.Add('MAX'); throw 'simulated MAX failure' } `
-        -RestartPrimary { param($reason) [void]$dispatchTrace.Add('RESTART') }
-    if (($dispatchTrace -join ',') -ne 'MAX,RESTART' -or $dispatch.outcome -ne 'PRIMARY_RESTARTED' -or -not $dispatch.resetPending) {
-        throw 'MAX request failure did not immediately dispatch primary restart.'
+        -ReleasePrimary { param($lease) [void]$dispatchTrace.Add('RELEASE') } -StartPrimary { [void]$dispatchTrace.Add('START') }
+    if (($dispatchTrace -join ',') -ne 'STOP,MAX,RELEASE,START' -or $dispatch.outcome -ne 'RECOVERY_FAILED' -or $dispatch.resetPending) {
+        throw 'MAX failure did not restart the primary while preserving a failed recovery result.'
     }
-    $cases.Add([ordered]@{ name = 'max-request-failure-dispatches-restart'; status = 'PASS' })
+    $cases.Add([ordered]@{ name = 'max-failure-restarts-but-does-not-report-success'; status = 'PASS' })
 
     $dispatchTrace.Clear()
-    $dispatch = Invoke-WatchdogRecoveryAction -Action MAX_AND_RESTART -Reason 'test threshold' `
-        -RequestMax { [void]$dispatchTrace.Add('MAX') } -RestartPrimary { param($reason) [void]$dispatchTrace.Add('RESTART') }
-    if (($dispatchTrace -join ',') -ne 'MAX,RESTART' -or $dispatch.outcome -ne 'PRIMARY_RESTARTED' -or -not $dispatch.resetPending) {
-        throw 'Restart threshold did not request MAX before primary restart.'
+    $dispatch = Invoke-WatchdogRecoveryAction -Action QUIESCE_MAX_RESTART -Reason 'test START failure' `
+        -StopPrimary { [void]$dispatchTrace.Add('STOP'); 'lease' } -RequestMax { [void]$dispatchTrace.Add('MAX') } `
+        -ReleasePrimary { param($lease) [void]$dispatchTrace.Add('RELEASE') } `
+        -StartPrimary { [void]$dispatchTrace.Add('START'); throw 'simulated START failure' }
+    if (($dispatchTrace -join ',') -ne 'STOP,MAX,RELEASE,START' -or $dispatch.outcome -ne 'RECOVERY_FAILED' -or $dispatch.resetPending) {
+        throw 'START failure was incorrectly reported as a successful recovery.'
     }
-    $cases.Add([ordered]@{ name = 'restart-threshold-dispatches-max-before-restart'; status = 'PASS' })
+    $cases.Add([ordered]@{ name = 'restart-failure-does-not-report-success'; status = 'PASS' })
 
     $continueAsts = @($watchdogAst.FindAll({ param($node) $node -is [Management.Automation.Language.ContinueStatementAst] }, $true))
     $integrityFailureIf = $watchdogAst.Find({
@@ -113,27 +136,27 @@ try {
     Write-Heartbeat -State MAX -Health REASSERT_PENDING -Behavior 256 -CpuRpm 1200 -GpuRpm 1100
     $probe = Invoke-Probe
     if ($probe.exitCode -eq 0 -or $probe.result.health.disposition -ne 'REASSERT_PENDING' -or
-        $probe.result.decision.action -ne 'MAX_ONLY' -or [double]$probe.result.verifyMaxAfterSeconds -ne 12 -or
+        $probe.result.decision.action -ne 'WAIT_PRIMARY' -or [double]$probe.result.verifyMaxAfterSeconds -ne 12 -or
         [int]$probe.result.decision.nextPendingCount -ne 1) {
-        throw 'A fresh MAX spin-up heartbeat did not force cooling while deferring controller restart.'
+        throw 'A fresh MAX spin-up heartbeat did not preserve the primary writer during its verification grace.'
     }
     $cases.Add([ordered]@{ name = 'max-reassert-pending-defers-restart'; status = 'PASS' })
 
     $probe = Invoke-Probe -PreviousPendingCount 1 -PendingElapsedSeconds 10
-    if ($probe.result.decision.action -ne 'MAX_ONLY' -or [int]$probe.result.decision.nextPendingCount -ne 2) {
+    if ($probe.result.decision.action -ne 'WAIT_PRIMARY' -or [int]$probe.result.decision.nextPendingCount -ne 2) {
         throw 'The second pending observation restarted before the protected verification interval elapsed.'
     }
     $cases.Add([ordered]@{ name = 'second-pending-before-grace-defers-restart'; status = 'PASS' })
 
     $probe = Invoke-Probe -PreviousPendingCount 2 -PendingElapsedSeconds 20
     if ($probe.exitCode -eq 0 -or $probe.result.health.disposition -ne 'REASSERT_PENDING' -or
-        $probe.result.decision.action -ne 'MAX_AND_RESTART' -or [int]$probe.result.decision.nextPendingCount -ne 3) {
+        $probe.result.decision.action -ne 'QUIESCE_MAX_RESTART' -or [int]$probe.result.decision.nextPendingCount -ne 3) {
         throw 'Persistent MAX spin-up failure did not become restartable after the bounded grace interval.'
     }
     $cases.Add([ordered]@{ name = 'persistent-reassert-pending-restarts'; status = 'PASS' })
 
     $probe = Invoke-Probe -PendingElapsedSeconds 20
-    if ($probe.result.decision.action -ne 'MAX_ONLY' -or [int]$probe.result.decision.nextPendingCount -ne 1) {
+    if ($probe.result.decision.action -ne 'WAIT_PRIMARY' -or [int]$probe.result.decision.nextPendingCount -ne 1) {
         throw 'A single pending observation was allowed to restart solely because elapsed time was high.'
     }
     $cases.Add([ordered]@{ name = 'single-pending-never-restarts'; status = 'PASS' })
@@ -149,7 +172,7 @@ try {
     Write-Heartbeat -State AUTO -Health REASSERT_PENDING -Behavior 512 -CpuRpm 6122 -GpuRpm 6122
     $probe = Invoke-Probe
     if ($probe.exitCode -eq 0 -or $probe.result.health.disposition -ne 'FATAL' -or
-        $probe.result.decision.action -ne 'MAX_AND_RESTART') {
+        $probe.result.decision.action -ne 'QUIESCE_MAX_RESTART') {
         throw 'AUTO REASSERT_PENDING did not force immediate single-writer recovery.'
     }
     $cases.Add([ordered]@{ name = 'auto-reassert-pending-restarts-immediately'; status = 'PASS' })
@@ -165,7 +188,7 @@ try {
         })
         $probe = Invoke-Probe
         if ($probe.exitCode -eq 0 -or $probe.result.health.disposition -ne 'FATAL' -or
-            $probe.result.decision.action -ne 'MAX_AND_RESTART' -or [string]$probe.result.health.detail -notmatch 'unsigned integer') {
+            $probe.result.decision.action -ne 'QUIESCE_MAX_RESTART' -or [string]$probe.result.health.detail -notmatch 'unsigned integer') {
             throw "Invalid fanBehaviorBitmap '$invalidBitmap' did not fail closed."
         }
     }
@@ -175,7 +198,7 @@ try {
     $probe = Invoke-Probe
     if ($probe.exitCode -eq 0 -or $probe.result.health.valid -or [string]$probe.result.health.detail -notmatch 'DEGRADED_FAIL_SAFE' -or
         $probe.result.health.disposition -ne 'FATAL' -or
-        $probe.result.decision.action -ne 'MAX_AND_RESTART') { throw 'Degraded heartbeat did not fail closed.' }
+        $probe.result.decision.action -ne 'QUIESCE_MAX_RESTART') { throw 'Degraded heartbeat did not fail closed.' }
     $cases.Add([ordered]@{ name = 'degraded-fails-closed'; status = 'PASS' })
 
     '{not-json' | Set-Content -LiteralPath (Join-Path $testRoot 'adaptive-fan-status.json') -Encoding utf8
