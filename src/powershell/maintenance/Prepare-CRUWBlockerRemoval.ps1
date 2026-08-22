@@ -1,17 +1,35 @@
 [CmdletBinding()]
 param(
     [switch] $OffMachineRecoveryKeyConfirmed,
-    [switch] $UserDeclaredOriginalSystemRestoreDisabled
+    [switch] $UserDeclaredOriginalSystemRestoreDisabled,
+    [switch] $UserDeclaredOriginalWinReDisabled
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+$producerSha256AtStart = [string](Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256 -ErrorAction Stop).Hash
 $corePath = Join-Path $PSScriptRoot 'CRUWBlockerPreflight.Core.ps1'
 if (-not (Test-Path -LiteralPath $corePath)) {
     throw "Required preflight core is missing: $corePath"
 }
+$coreSha256BeforeLoad = [string](Get-FileHash -LiteralPath $corePath -Algorithm SHA256 -ErrorAction Stop).Hash
 . $corePath
+$coreSha256AfterLoad = [string](Get-FileHash -LiteralPath $corePath -Algorithm SHA256 -ErrorAction Stop).Hash
+if (-not [string]::Equals($coreSha256BeforeLoad, $coreSha256AfterLoad, [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'CRUW preflight core changed while being loaded'
+}
+$implementationContract = Get-CruwImplementationArtifactContract `
+    -SourceDirectory $PSScriptRoot `
+    -ProducerPath $PSCommandPath
+$producerArtifact = @($implementationContract.artifacts | Where-Object { $_.role -eq 'preflight-producer' })
+$coreArtifact = @($implementationContract.artifacts | Where-Object { $_.role -eq 'preflight-core' })
+if ($producerArtifact.Count -ne 1 -or
+    $coreArtifact.Count -ne 1 -or
+    -not [string]::Equals([string]$producerArtifact[0].sha256, $producerSha256AtStart, [StringComparison]::OrdinalIgnoreCase) -or
+    -not [string]::Equals([string]$coreArtifact[0].sha256, $coreSha256BeforeLoad, [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'CRUW preflight implementation changed between load and contract sealing'
+}
 
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
     [Security.Principal.WindowsBuiltInRole]::Administrator
@@ -23,6 +41,7 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
     )
     if ($OffMachineRecoveryKeyConfirmed) { $elevationArguments += '-OffMachineRecoveryKeyConfirmed' }
     if ($UserDeclaredOriginalSystemRestoreDisabled) { $elevationArguments += '-UserDeclaredOriginalSystemRestoreDisabled' }
+    if ($UserDeclaredOriginalWinReDisabled) { $elevationArguments += '-UserDeclaredOriginalWinReDisabled' }
     $process = Start-Process -FilePath $pwsh -Verb RunAs -WindowStyle Hidden -ArgumentList $elevationArguments -Wait -PassThru
     exit $process.ExitCode
 }
@@ -76,26 +95,80 @@ $driverPath = Join-Path $recoveryPath 'driver'
 $implementationPath = Join-Path $recoveryPath 'implementation'
 $secondaryRoot = 'D:\Acer-Recovery'
 $secondaryPath = Join-Path $secondaryRoot "CRUWBlocker-$stamp"
-New-Item -ItemType Directory -Path $recoveryPath -Force | Out-Null
 $failurePath = Join-Path $recoveryPath 'preflight-error.txt'
 trap {
     $details = ($_ | Format-List * -Force | Out-String)
-    [System.IO.File]::WriteAllText($failurePath, $details, [System.Text.UTF8Encoding]::new($false))
-    Write-Error $details
+    if (Test-Path -LiteralPath $recoveryPath -PathType Container) {
+        [System.IO.File]::WriteAllText($failurePath, $details, [System.Text.UTF8Encoding]::new($false))
+    }
+    [Console]::Error.WriteLine($details)
     exit 1
 }
+$logicalDisks = @(Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DeviceID='C:' OR DeviceID='D:'" -ErrorAction Stop)
+foreach ($drive in @('C:', 'D:')) {
+    $matches = @($logicalDisks | Where-Object { [string]::Equals([string]$_.DeviceID, $drive, [StringComparison]::OrdinalIgnoreCase) })
+    if ($matches.Count -ne 1 -or [int]$matches[0].DriveType -ne 3) {
+        throw "Recovery drive must resolve to exactly one local fixed disk before any write: $drive"
+    }
+}
+[void](Assert-CruwLocalRecoveryPathBeforeWrite -CandidatePath $recoveryPath -AllowedBasePath $root -ExpectedDrive 'C:')
+[void](Assert-CruwLocalRecoveryPathBeforeWrite -CandidatePath $secondaryPath -AllowedBasePath $secondaryRoot -ExpectedDrive 'D:')
+$primaryParentAnchors = @(Enter-CruwDirectoryAnchorChain -DirectoryPath $root -AnchorBasePath 'C:\Acer-Driver-Audit' -ExpectedDrive 'C:')
+$secondaryParentAnchors = @(Enter-CruwDirectoryAnchorChain -DirectoryPath $secondaryRoot -AnchorBasePath $secondaryRoot -ExpectedDrive 'D:')
+foreach ($fixedParent in @($root, $secondaryRoot)) {
+    if (-not (Test-Path -LiteralPath $fixedParent -PathType Container)) {
+        throw "Fixed recovery parent must already exist before this transaction: $fixedParent"
+    }
+    Set-CruwProtectedRecoveryAcl -Path $fixedParent
+    $fixedParentAcl = Test-CruwProtectedRecoveryAcl -Path $fixedParent
+    if (-not $fixedParentAcl.Verified) {
+        throw "Fixed recovery parent is not protected for SYSTEM and Administrators only: $fixedParent"
+    }
+}
+if ((Test-Path -LiteralPath $recoveryPath) -or (Test-Path -LiteralPath $secondaryPath)) {
+    throw 'Timestamped recovery roots must not pre-exist'
+}
+New-Item -ItemType Directory -Path $recoveryPath -ErrorAction Stop | Out-Null
 Set-CruwProtectedRecoveryAcl -Path $recoveryPath
+New-Item -ItemType Directory -Path $secondaryPath -ErrorAction Stop | Out-Null
+Set-CruwProtectedRecoveryAcl -Path $secondaryPath
+$primaryRecoveryAnchors = @(Enter-CruwDirectoryAnchorChain -DirectoryPath $recoveryPath -AnchorBasePath $root -ExpectedDrive 'C:')
+$secondaryRecoveryAnchors = @(Enter-CruwDirectoryAnchorChain -DirectoryPath $secondaryPath -AnchorBasePath $secondaryRoot -ExpectedDrive 'D:')
+[void](Assert-CruwLocalRecoveryPathBeforeWrite -CandidatePath $recoveryPath -AllowedBasePath $root -ExpectedDrive 'C:')
+[void](Assert-CruwLocalRecoveryPathBeforeWrite -CandidatePath $secondaryPath -AllowedBasePath $secondaryRoot -ExpectedDrive 'D:')
+$freshPrimaryAcl = Test-CruwProtectedRecoveryAcl -Path $recoveryPath
+$freshSecondaryAcl = Test-CruwProtectedRecoveryAcl -Path $secondaryPath
+if (-not $freshPrimaryAcl.Verified -or -not $freshSecondaryAcl.Verified) {
+    throw 'Fresh recovery roots lost their protected ACL before payload writes'
+}
 New-Item -ItemType Directory -Path $driverPath -Force | Out-Null
 New-Item -ItemType Directory -Path $implementationPath -Force | Out-Null
-Copy-Item -LiteralPath $PSCommandPath -Destination (Join-Path $implementationPath 'Prepare-CRUWBlockerRemoval.ps1') -Force
-Copy-Item -LiteralPath $corePath -Destination (Join-Path $implementationPath 'CRUWBlockerPreflight.Core.ps1') -Force
-New-Item -ItemType Directory -Path $secondaryRoot -Force | Out-Null
-New-Item -ItemType Directory -Path $secondaryPath -Force | Out-Null
-Set-CruwProtectedRecoveryAcl -Path $secondaryPath
-
-$preflightSchemaVersion = 2
-$scriptSha256 = (Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash
-$coreSha256 = (Get-FileHash -LiteralPath $corePath -Algorithm SHA256).Hash
+foreach ($artifact in @($implementationContract.artifacts)) {
+    $artifactFileName = [IO.Path]::GetFileName([string]$artifact.relativePath)
+    $artifactSourcePath = if ($artifact.role -eq 'preflight-producer') {
+        $PSCommandPath
+    }
+    else {
+        Join-Path $PSScriptRoot $artifactFileName
+    }
+    $artifactDestinationPath = Join-Path $implementationPath $artifactFileName
+    Copy-Item -LiteralPath $artifactSourcePath -Destination $artifactDestinationPath -Force
+    $sealedArtifactSha256 = [string](Get-FileHash -LiteralPath $artifactDestinationPath -Algorithm SHA256).Hash
+    if (-not [string]::Equals($sealedArtifactSha256, [string]$artifact.sha256, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "CRUW implementation artifact changed while being sealed: $artifactFileName"
+    }
+}
+$sealedImplementationEntries = @(Get-ChildItem -LiteralPath $implementationPath -Force -ErrorAction Stop)
+$expectedImplementationNames = @($implementationContract.artifacts | ForEach-Object { [IO.Path]::GetFileName([string]$_.relativePath) })
+if ($sealedImplementationEntries.Count -ne $expectedImplementationNames.Count -or
+    @($sealedImplementationEntries | Where-Object {
+        $_.PSIsContainer -or
+        ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        $expectedImplementationNames -cnotcontains $_.Name
+    }).Count -gt 0) {
+    throw 'Sealed implementation directory does not contain the exact six-file artifact set'
+}
+$preflightSchemaVersion = 3
 $operatingSystem = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
 $lastBootUpTime = if ($operatingSystem.LastBootUpTime -is [datetime]) {
     [datetime]$operatingSystem.LastBootUpTime
@@ -122,16 +195,25 @@ $encryptedMountedVolumeReadiness = @($allBitLockerVolumes | Where-Object {
 } | ForEach-Object {
     $volume = $_
     $protectorCount = @($volume.KeyProtector | Where-Object KeyProtectorType -eq 'RecoveryPassword').Count
+    $readyForTransaction =
+        (Test-CruwStringEqual $volume.VolumeStatus 'FullyEncrypted') -and
+        (Test-CruwStringEqual $volume.ProtectionStatus 'On') -and
+        (Test-CruwStringEqual $volume.LockStatus 'Unlocked') -and
+        [int]$volume.EncryptionPercentage -eq 100 -and
+        $protectorCount -ge 1
     [pscustomobject]@{
         MountPoint = [string]$volume.MountPoint
         VolumeStatus = [string]$volume.VolumeStatus
         ProtectionStatus = [string]$volume.ProtectionStatus
+        LockStatus = [string]$volume.LockStatus
         EncryptionPercentage = $volume.EncryptionPercentage
         RecoveryPasswordProtectorCount = $protectorCount
         Recoverable = $protectorCount -ge 1
+        ReadyForTransaction = $readyForTransaction
     }
 })
 $allEncryptedMountedVolumesRecoverable = @($encryptedMountedVolumeReadiness | Where-Object { -not $_.Recoverable }).Count -eq 0
+$allEncryptedMountedVolumesReady = @($encryptedMountedVolumeReadiness | Where-Object { -not $_.ReadyForTransaction }).Count -eq 0
 $winReOutput = (& reagentc.exe /info 2>&1 | Out-String).Trim()
 $winReInfoExitCode = $LASTEXITCODE
 $winReEnabled = $winReInfoExitCode -eq 0 -and
@@ -143,6 +225,16 @@ $winReLocationMatch = [regex]::Match(
     '(?im)(?:location|Ubicaci[oó]n)[^\r\n]*:\s*(\\\\\?\\GLOBALROOT[^\r\n]*)'
 )
 $winReLocation = if ($winReLocationMatch.Success) { $winReLocationMatch.Groups[1].Value.Trim() } else { $null }
+$winReLocationSha256 = $null
+if (-not [string]::IsNullOrWhiteSpace($winReLocation)) {
+    try {
+        $winReLocationSha256 = Get-CruwCanonicalWinReLocationSha256 -Location $winReLocation
+    }
+    catch {
+        $winReLocationSha256 = $null
+    }
+}
+$winReLocationReady = [string]$winReLocationSha256 -match '^[A-F0-9]{64}$'
 $winReInitialState = if ($winReEnabled) { 'Enabled' } elseif ($winReDisabled) { 'Disabled' } else { 'Unknown' }
 
 $systemRestorePolicyPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\SystemRestore'
@@ -174,12 +266,18 @@ $restoreBeforeRecords = @($restoreBeforeAll | ForEach-Object {
     }
 })
 $checkpointDescription = 'Before CRUWBlocker removal'
-$checkpointCutoff = (Get-Date).AddHours(-26)
-$recentNamedBefore = @($restoreBeforeRecords | Where-Object {
-    $_.Description -eq $checkpointDescription -and
+$checkpointNowBefore = Get-Date
+$checkpointCutoffBefore = $checkpointNowBefore.AddHours(-23)
+$recentNamedBefore = @(Get-CruwLatestRestorePointBySequence -RestorePoints @($restoreBeforeRecords | Where-Object {
+    $_.Description -ceq $checkpointDescription -and
     $null -ne $_.CreationDate -and
-    $_.CreationDate -ge $checkpointCutoff
-} | Sort-Object CreationDate -Descending | Select-Object -First 1)
+    $_.CreationDate -ge $checkpointCutoffBefore -and
+    $_.CreationDate -le $checkpointNowBefore
+}))
+$latestRestoreBefore = @(Get-CruwLatestRestorePointBySequence -RestorePoints $restoreBeforeRecords)
+$recentNamedBeforeIsLatest = Test-CruwLatestRestorePointMatch `
+    -UsableNamedRestore $recentNamedBefore `
+    -LatestRestore $latestRestoreBefore
 
 $restoreCreated = $false
 $restoreReused = $false
@@ -187,7 +285,7 @@ $restoreError = $null
 if (-not $restoreQuerySucceeded) {
     $restoreError = "Restore-point inventory failed; checkpoint was not attempted to avoid a duplicate: $restoreQueryError"
 }
-elseif ($recentNamedBefore.Count -eq 1) {
+elseif ($recentNamedBeforeIsLatest) {
     $restoreReused = $true
 }
 else {
@@ -218,13 +316,18 @@ $restoreAfterRecords = @($restoreAfterAll | ForEach-Object {
         RestorePointType = $_.RestorePointType
     }
 })
-$usableNamedRestore = @($restoreAfterRecords | Where-Object {
-    $_.Description -eq $checkpointDescription -and
+$checkpointValidationNow = Get-Date
+$checkpointCutoff = $checkpointValidationNow.AddHours(-23)
+$usableNamedRestore = @(Get-CruwLatestRestorePointBySequence -RestorePoints @($restoreAfterRecords | Where-Object {
+    $_.Description -ceq $checkpointDescription -and
     $null -ne $_.CreationDate -and
-    $_.CreationDate -ge $checkpointCutoff
-} | Sort-Object CreationDate -Descending | Select-Object -First 1)
-$restoreUsable = $usableNamedRestore.Count -eq 1
-$latestRestore = @($restoreAfterRecords | Sort-Object CreationDate -Descending | Select-Object -First 1)
+    $_.CreationDate -ge $checkpointCutoff -and
+    $_.CreationDate -le $checkpointValidationNow
+}))
+$latestRestore = @(Get-CruwLatestRestorePointBySequence -RestorePoints $restoreAfterRecords)
+$restoreUsable = Test-CruwLatestRestorePointMatch `
+    -UsableNamedRestore $usableNamedRestore `
+    -LatestRestore $latestRestore
 
 $systemRestoreOperationalAtStart = $null
 $systemRestoreStateBasis = 'No conclusive read-only signal'
@@ -244,6 +347,11 @@ elseif ($restoreCreated) {
 elseif (-not $restoreQuerySucceeded) {
     $systemRestoreStateBasis = 'Restore-point inventory failed'
 }
+$systemRestoreReady = $restoreQuerySucceeded -and
+    $systemRestoreOperationalAtStart -eq $true -and
+    $policyDisableSR -ne 1 -and
+    $runtimeDisableSR -ne 1 -and
+    $restoreUsable
 
 $targetFilterName = 'CRUWBlocker'
 $expectedOriginalInf = 'cruwblocker.inf'
@@ -341,9 +449,17 @@ $fallbackGate = Test-CruwFallbackReadiness -DiskInfFilePresent (Test-Path -Liter
 $exportOutput = (& pnputil.exe /export-driver $targetPublishedName $driverPath 2>&1 | Out-String).Trim()
 if ($LASTEXITCODE -ne 0) { throw "Driver export failed for $targetPublishedName`: $exportOutput" }
 $expectedFiles = @('cruwblocker.inf', 'CRUWBlocker.sys', 'CRUWBlocker.cat')
-$exportedFiles = @(Get-ChildItem -LiteralPath $driverPath -File)
+$exportedFiles = @(Get-ChildItem -LiteralPath $driverPath -Force -ErrorAction Stop)
+if ($exportedFiles.Count -ne $expectedFiles.Count -or
+    @($exportedFiles | Where-Object {
+        $_.PSIsContainer -or
+        ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        $expectedFiles -cnotcontains $_.Name
+    }).Count -gt 0) {
+    throw 'Driver export must contain exactly cruwblocker.inf, CRUWBlocker.sys and CRUWBlocker.cat with no extra payload'
+}
 foreach ($expected in $expectedFiles) {
-    if (-not ($exportedFiles.Name -icontains $expected)) { throw "Export is incomplete; missing $expected" }
+    if ($exportedFiles.Name -cnotcontains $expected) { throw "Export is incomplete; missing exact-case $expected" }
 }
 $hashes = @($exportedFiles | Get-FileHash -Algorithm SHA256 | Select-Object @{n='file';e={Split-Path -Leaf $_.Path}}, Hash)
 $exportedDriverMatches = @($exportedFiles | Where-Object Name -ieq 'CRUWBlocker.sys')
@@ -355,8 +471,25 @@ $exportedDriverPath = $exportedDriverMatches[0].FullName
 $exportedCatalogPath = $exportedCatalogMatches[0].FullName
 $exportedDriverSignature = Get-AuthenticodeSignature -FilePath $exportedDriverPath
 $exportedCatalogSignature = Get-AuthenticodeSignature -FilePath $exportedCatalogPath
-$exportedPackageSigned = $exportedDriverSignature.Status -eq [Management.Automation.SignatureStatus]::Valid -and
+$exportedInfMatches = @($exportedFiles | Where-Object Name -ieq 'cruwblocker.inf')
+if ($exportedInfMatches.Count -ne 1) { throw 'Exported CRUWBlocker INF identity is ambiguous' }
+$exportedInfPath = $exportedInfMatches[0].FullName
+$exportedInfSignature = Get-AuthenticodeSignature -FilePath $exportedInfPath
+$exportedPackageSigned = $exportedInfSignature.Status -eq [Management.Automation.SignatureStatus]::Valid -and
+    $exportedDriverSignature.Status -eq [Management.Automation.SignatureStatus]::Valid -and
     $exportedCatalogSignature.Status -eq [Management.Automation.SignatureStatus]::Valid
+$exportedInfSha256 = (Get-FileHash -LiteralPath $exportedInfPath -Algorithm SHA256).Hash
+$exportedInfText = [IO.File]::ReadAllText($exportedInfPath)
+$knownPackageSha256 = [ordered]@{
+    'cruwblocker.inf' = 'D9A075F6849EE76CD43BBA4C4FE6B27D27A5788D9A25695413E7791CCA5EBA2B'
+    'CRUWBlocker.sys' = 'F59BE364EB9360C999C6F68218100D0A343BA8D1D67E5AC4419DD79C56A7A18C'
+    'CRUWBlocker.cat' = '5D8298B9C1908A84E2CD68B6AFF4EA71E9AF3F5B3C850694A74626775A4E3862'
+}
+$knownPackageHashesVerified = @($hashes | Where-Object {
+    $expectedHash = $knownPackageSha256[[string]$_.file]
+    [string]::IsNullOrWhiteSpace([string]$expectedHash) -or
+    -not [string]::Equals([string]$_.Hash, [string]$expectedHash, [StringComparison]::OrdinalIgnoreCase)
+}).Count -eq 0 -and $hashes.Count -eq $knownPackageSha256.Count
 
 $systemHivePath = Join-Path $recoveryPath 'SYSTEM.before.hiv'
 $regOutput = (& reg.exe save 'HKLM\SYSTEM' $systemHivePath /y 2>&1 | Out-String).Trim()
@@ -388,6 +521,8 @@ $classLowerFilters = @(Get-CruwPropertyValue -InputObject $diskClassRegistry -Na
 $classUpperFilters = @(Get-CruwPropertyValue -InputObject $diskClassRegistry -Name 'UpperFilters')
 $filterServiceRegistryPath = 'HKLM:\SYSTEM\CurrentControlSet\Services\CRUWBlocker'
 $filterServiceRegistry = Get-ItemProperty -LiteralPath $filterServiceRegistryPath -ErrorAction Stop
+$filterServiceStartOverridePath = Join-Path $filterServiceRegistryPath 'StartOverride'
+$filterServiceStartOverrideAbsent = -not (Test-Path -LiteralPath $filterServiceStartOverridePath)
 $filterSystemDrivers = @(Get-CimInstance -ClassName Win32_SystemDriver -Filter "Name='CRUWBlocker'" -ErrorAction Stop)
 $filterServiceBinaryPath = Join-Path $env:windir 'System32\drivers\CRUWBlocker.sys'
 $filterServiceImagePath = [string]$filterServiceRegistry.ImagePath
@@ -400,11 +535,30 @@ $exportedDriverSha256 = (Get-FileHash -LiteralPath $exportedDriverPath -Algorith
 $exportedCatalogSha256 = (Get-FileHash -LiteralPath $exportedCatalogPath -Algorithm SHA256).Hash
 $filterServiceBinaryMatchesExport = -not [string]::IsNullOrWhiteSpace($filterServiceBinarySha256) -and
     $filterServiceBinarySha256 -eq $exportedDriverSha256
+$exportedPackageVerified = $exportedPackageSigned -and $knownPackageHashesVerified -and $filterServiceBinaryMatchesExport
 $filterServiceReady = $filterSystemDrivers.Count -eq 1 -and
     (Test-CruwStringEqual $filterSystemDrivers[0].State 'Running') -and
     [int]$filterServiceRegistry.Type -eq 1 -and [int]$filterServiceRegistry.Start -eq 0 -and
+    [int]$filterServiceRegistry.ErrorControl -eq 1 -and
+    (Test-CruwStringEqual $filterServiceRegistry.Group 'Pnp Filter') -and
+    $filterServiceStartOverrideAbsent -and
     $filterServiceImagePathReady -and (Test-Path -LiteralPath $filterServiceBinaryPath) -and
-    $filterServiceBinaryMatchesExport -and $exportedPackageSigned
+    $filterServiceBinaryMatchesExport -and $exportedPackageVerified
+$setupApiPromotionEvidence = @(Get-CruwSetupApiPromotionEvidence -InfDirectory (Join-Path $env:windir 'INF'))
+$rollbackCapability = Get-CruwRollbackCapabilityContract `
+    -InfText $exportedInfText `
+    -ExportedPackageVerified $exportedPackageVerified `
+    -ExportedInfSha256 $exportedInfSha256 `
+    -LiveService ([pscustomobject]@{
+        Start = $filterServiceRegistry.Start
+        Type = $filterServiceRegistry.Type
+        ErrorControl = $filterServiceRegistry.ErrorControl
+        Group = $filterServiceRegistry.Group
+        ImagePath = $filterServiceImagePath
+        StartOverrideAbsent = $filterServiceStartOverrideAbsent
+        State = if ($filterSystemDrivers.Count -eq 1) { [string]$filterSystemDrivers[0].State } else { $null }
+    }) `
+    -PromotionEvidence $setupApiPromotionEvidence
 $filterSnapshot = [ordered]@{
     schemaVersion = 1
     capturedAt = (Get-Date).ToString('o')
@@ -426,7 +580,11 @@ $filterSnapshot = [ordered]@{
         name = 'CRUWBlocker'
         start = [int]$filterServiceRegistry.Start
         type = [int]$filterServiceRegistry.Type
+        errorControl = [int]$filterServiceRegistry.ErrorControl
+        group = [string]$filterServiceRegistry.Group
         imagePath = $filterServiceImagePath
+        imagePathCanonical = ConvertTo-CruwCanonicalServiceImagePath -ImagePath $filterServiceImagePath
+        startOverrideAbsent = $filterServiceStartOverrideAbsent
         imagePathVerified = $filterServiceImagePathReady
         state = if ($filterSystemDrivers.Count -eq 1) { [string]$filterSystemDrivers[0].State } else { $null }
         binaryPresent = Test-Path -LiteralPath $filterServiceBinaryPath
@@ -434,6 +592,8 @@ $filterSnapshot = [ordered]@{
         binaryMatchesExport = $filterServiceBinaryMatchesExport
         exportedDriverSignatureStatus = [string]$exportedDriverSignature.Status
         exportedCatalogSignatureStatus = [string]$exportedCatalogSignature.Status
+        exportedInfSignatureStatus = [string]$exportedInfSignature.Status
+        knownPackageHashesVerified = $knownPackageHashesVerified
         ready = $filterServiceReady
     }
 }
@@ -442,7 +602,12 @@ $filterSnapshotJson = $filterSnapshot | ConvertTo-Json -Depth 8
 [System.IO.File]::WriteAllText($filterSnapshotPath, $filterSnapshotJson + [Environment]::NewLine, [System.Text.UTF8Encoding]::new($false))
 
 $physicalDisks = @(Get-PhysicalDisk | Select-Object FriendlyName, HealthStatus, OperationalStatus)
-$disksHealthy = @($physicalDisks | Where-Object { $_.HealthStatus -ne 'Healthy' -or $_.OperationalStatus -notcontains 'OK' }).Count -eq 0
+$disksHealthy = $physicalDisks.Count -ge 2 -and @($physicalDisks | Where-Object {
+    $operationalStatus = @($_.OperationalStatus)
+    -not (Test-CruwStringEqual $_.HealthStatus 'Healthy') -or
+    $operationalStatus.Count -ne 1 -or
+    -not (Test-CruwStringEqual $operationalStatus[0] 'OK')
+}).Count -eq 0
 $cbsReboot = Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending'
 $wuReboot = Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired'
 $pendingRename = @((Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -Name PendingFileRenameOperations -ErrorAction SilentlyContinue).PendingFileRenameOperations).Count
@@ -455,11 +620,11 @@ $requiredBackupFiles = @(
     'SYSTEM.before.hiv',
     'disk-drivers-before.txt',
     'winre-before.txt',
-    'filter-snapshot-before.json',
-    'implementation\Prepare-CRUWBlockerRemoval.ps1',
-    'implementation\CRUWBlockerPreflight.Core.ps1'
-)
+    'filter-snapshot-before.json'
+) + @($implementationContract.artifacts | ForEach-Object { [string]$_.relativePath })
 Get-ChildItem -LiteralPath $recoveryPath -Force | Copy-Item -Destination $secondaryPath -Recurse -Force
+[void](Assert-CruwExactRecoveryTree -RootPath $recoveryPath -RequiredRelativeFiles $requiredBackupFiles)
+[void](Assert-CruwExactRecoveryTree -RootPath $secondaryPath -RequiredRelativeFiles $requiredBackupFiles)
 $secondaryFileVerification = @($requiredBackupFiles | ForEach-Object {
     $relativePath = $_
     $primaryFile = Join-Path $recoveryPath $relativePath
@@ -477,30 +642,39 @@ $secondaryFileVerification = @($requiredBackupFiles | ForEach-Object {
         hashesMatch = $primaryExists -and $secondaryExists -and $primaryHash -eq $secondaryHash
     }
 })
+[void](Assert-CruwImplementationArtifactFileHashes `
+    -ImplementationContract $implementationContract `
+    -FileVerification $secondaryFileVerification)
+[void](Assert-CruwDriverPayloadFileHashes `
+    -DriverExportHashes $hashes `
+    -FileVerification $secondaryFileVerification `
+    -ExportedInfSha256 $exportedInfSha256 `
+    -ExportedDriverSha256 $exportedDriverSha256 `
+    -ExportedCatalogSha256 $exportedCatalogSha256)
 $secondaryVerified = @($secondaryFileVerification | Where-Object { -not $_.hashesMatch }).Count -eq 0
 Set-CruwProtectedRecoveryTreeAcl -Path $recoveryPath
 Set-CruwProtectedRecoveryTreeAcl -Path $secondaryPath
 $primaryAcl = Test-CruwProtectedRecoveryAcl -Path $recoveryPath -Recurse
 $secondaryAcl = Test-CruwProtectedRecoveryAcl -Path $secondaryPath -Recurse
 $bitLockerReady = (Test-CruwStringEqual $bitLocker.VolumeStatus 'FullyEncrypted') -and
-    (Test-CruwStringEqual $bitLocker.ProtectionStatus 'On') -and $recoveryPasswordCount -ge 1
-$technicalPreflightPass = ($power.ACLineStatus -eq 1) -and $winReEnabled -and
-    $bitLockerReady -and $allEncryptedMountedVolumesRecoverable -and
+    (Test-CruwStringEqual $bitLocker.ProtectionStatus 'On') -and
+    (Test-CruwStringEqual $bitLocker.LockStatus 'Unlocked') -and
+    [int]$bitLocker.EncryptionPercentage -eq 100 -and
+    $recoveryPasswordCount -ge 1
+$technicalPreflightPass = ($power.ACLineStatus -eq 1) -and $winReEnabled -and $winReLocationReady -and
+    $bitLockerReady -and $allEncryptedMountedVolumesRecoverable -and $allEncryptedMountedVolumesReady -and
     [bool]$OffMachineRecoveryKeyConfirmed -and
-    $restoreUsable -and (Test-Path -LiteralPath $systemHivePath) -and $secondaryVerified -and
+    $systemRestoreReady -and (Test-Path -LiteralPath $systemHivePath) -and $secondaryVerified -and
     $primaryAcl.Verified -and $secondaryAcl.Verified -and
     $disksHealthy -and $targetBindingVerified -and $targetDevicesHealthy -and
     $presentDiskTopologyVerified -and $targetDeviceCountVerified -and $bootIdentityReady -and
-    $filterServiceReady -and $volumeLayoutGate.Verified -and $fallbackGate.Verified -and -not $pendingRebootDetected
+    $filterServiceReady -and $rollbackCapability.automaticRollbackEligible -and
+    $volumeLayoutGate.Verified -and $fallbackGate.Verified -and -not $pendingRebootDetected
 
 $preflight = [ordered]@{
     schemaVersion = $preflightSchemaVersion
     checkedAt = (Get-Date).ToString('o')
-    implementation = [ordered]@{
-        scriptSha256 = $scriptSha256
-        coreSha256 = $coreSha256
-        driverMutationCapabilityPresent = $false
-    }
+    implementation = $implementationContract
     bootIdentity = [ordered]@{
         lastBootUpTimeUtc = $lastBootUpTimeUtc
         operatingSystemBuild = [string]$operatingSystem.BuildNumber
@@ -515,11 +689,17 @@ $preflight = [ordered]@{
         winRe = [ordered]@{
             state = $winReInitialState
             enabled = $winReEnabled
+            userDeclaredOriginalDisabled = [bool]$UserDeclaredOriginalWinReDisabled
+            originalStateDeclarationSource = if ($UserDeclaredOriginalWinReDisabled) { 'explicit-user-switch' } else { 'not-provided' }
+            originalStateWasNotInferred = $true
             infoExitCode = $winReInfoExitCode
             recoveryLocation = $winReLocation
+            recoveryLocationSha256 = $winReLocationSha256
+            recoveryLocationVerified = $winReLocationReady
             rawEvidenceFile = 'winre-before.txt'
         }
         systemRestore = [ordered]@{
+            readyForTransaction = $systemRestoreReady
             operationalAtStart = $systemRestoreOperationalAtStart
             stateBasis = $systemRestoreStateBasis
             userDeclaredOriginalDisabled = [bool]$UserDeclaredOriginalSystemRestoreDisabled
@@ -530,6 +710,7 @@ $preflight = [ordered]@{
             restorePointCountBefore = $restoreBeforeRecords.Count
             policyDisableSR = $policyDisableSR
             policyDisableConfig = $policyDisableConfig
+            disableConfigRecordedButNotUsedAsDisableSignal = $true
             runtimeDisableSR = $runtimeDisableSR
             scheduledTaskState = if ($null -ne $systemRestoreTask) { [string]$systemRestoreTask.State } else { $null }
             scheduledTaskEnabled = if ($null -ne $systemRestoreTask) { [bool]$systemRestoreTask.Settings.Enabled } else { $null }
@@ -543,14 +724,17 @@ $preflight = [ordered]@{
         recoveryPasswordProtectorCount = $recoveryPasswordCount
         readyForBoundedSuspension = $bitLockerReady
         allEncryptedMountedVolumesRecoverable = $allEncryptedMountedVolumesRecoverable
+        allEncryptedMountedVolumesReady = $allEncryptedMountedVolumesReady
         mountedEncryptedVolumes = @($encryptedMountedVolumeReadiness | ForEach-Object {
             [ordered]@{
                 mountPoint = [string]$_.MountPoint
                 volumeStatus = [string]$_.VolumeStatus
                 protectionStatus = [string]$_.ProtectionStatus
+                lockStatus = [string]$_.LockStatus
                 encryptionPercentage = $_.EncryptionPercentage
                 recoveryPasswordProtectorCount = $_.RecoveryPasswordProtectorCount
                 recoverable = [bool]$_.Recoverable
+                readyForTransaction = [bool]$_.ReadyForTransaction
             }
         })
         secretRecorded = $false
@@ -563,9 +747,10 @@ $preflight = [ordered]@{
         requiredDescription = $checkpointDescription
         cutoff = $checkpointCutoff.ToString('o')
         latestDescription = if ($latestRestore.Count) { [string]$latestRestore[0].Description } else { $null }
+        latestSequenceNumber = if ($latestRestore.Count) { [long]$latestRestore[0].SequenceNumber } else { $null }
         latestCreationTime = if ($latestRestore.Count -and $null -ne $latestRestore[0].CreationDate) { $latestRestore[0].CreationDate.ToString('o') } else { $null }
-        usablePointSequenceNumber = if ($usableNamedRestore.Count) { $usableNamedRestore[0].SequenceNumber } else { $null }
-        usablePointCreationTime = if ($usableNamedRestore.Count) { $usableNamedRestore[0].CreationDate.ToString('o') } else { $null }
+        usablePointSequenceNumber = if ($restoreUsable) { $usableNamedRestore[0].SequenceNumber } else { $null }
+        usablePointCreationTime = if ($restoreUsable) { $usableNamedRestore[0].CreationDate.ToString('o') } else { $null }
         error = $restoreError
     }
     driverExport = [ordered]@{
@@ -578,9 +763,12 @@ $preflight = [ordered]@{
         hashes = $hashes
         driverSignatureStatus = [string]$exportedDriverSignature.Status
         catalogSignatureStatus = [string]$exportedCatalogSignature.Status
+        infSignatureStatus = [string]$exportedInfSignature.Status
         signaturesValid = $exportedPackageSigned
+        knownPackageHashesVerified = $knownPackageHashesVerified
         exportOutput = $exportOutput
     }
+    rollbackCapability = $rollbackCapability
     systemHiveSaved = (Test-Path -LiteralPath $systemHivePath)
     devices = @($devices)
     driverBindingDiscovery = [ordered]@{
@@ -649,7 +837,8 @@ $preflight = [ordered]@{
     offMachineRecoveryKeyConfirmed = [bool]$OffMachineRecoveryKeyConfirmed
     userMustConfirmOffMachineRecoveryKey = -not [bool]$OffMachineRecoveryKeyConfirmed
     restorationIntent = [ordered]@{
-        winReOriginalState = $winReInitialState
+        winReOriginalState = if ($UserDeclaredOriginalWinReDisabled) { 'Disabled' } else { 'Unknown' }
+        winReOriginalStateSource = if ($UserDeclaredOriginalWinReDisabled) { 'explicit-user-switch' } else { 'not-provided' }
         systemRestoreOriginalState = if ($UserDeclaredOriginalSystemRestoreDisabled) { 'Disabled' } else { 'Unknown' }
         systemRestoreOriginalStateSource = if ($UserDeclaredOriginalSystemRestoreDisabled) { 'explicit-user-switch' } else { 'not-provided' }
         declarationAffectsTechnicalPass = $false
@@ -679,6 +868,8 @@ $preflightJson = $preflight | ConvertTo-Json -Depth 12
 $secondaryPreflightPath = Join-Path $secondaryPath 'preflight.json'
 Copy-Item -LiteralPath $preflightPath -Destination $secondaryPreflightPath -Force
 $finalRequiredBackupFiles = @($requiredBackupFiles) + @('preflight.json')
+[void](Assert-CruwExactRecoveryTree -RootPath $recoveryPath -RequiredRelativeFiles $finalRequiredBackupFiles)
+[void](Assert-CruwExactRecoveryTree -RootPath $secondaryPath -RequiredRelativeFiles $finalRequiredBackupFiles)
 $finalFileVerification = @($finalRequiredBackupFiles | ForEach-Object {
     $relativePath = $_
     $primaryFile = Join-Path $recoveryPath $relativePath
@@ -699,6 +890,15 @@ $finalFileVerification = @($finalRequiredBackupFiles | ForEach-Object {
 if (@($finalFileVerification | Where-Object { -not $_.hashesMatch }).Count -gt 0) {
     throw 'One or more finalized primary and secondary recovery payload hashes do not match'
 }
+[void](Assert-CruwImplementationArtifactFileHashes `
+    -ImplementationContract $implementationContract `
+    -FileVerification $finalFileVerification)
+[void](Assert-CruwDriverPayloadFileHashes `
+    -DriverExportHashes $hashes `
+    -FileVerification $finalFileVerification `
+    -ExportedInfSha256 $exportedInfSha256 `
+    -ExportedDriverSha256 $exportedDriverSha256 `
+    -ExportedCatalogSha256 $exportedCatalogSha256)
 
 $integrityManifest = [ordered]@{
     schemaVersion = 1
@@ -711,10 +911,7 @@ $integrityManifest = [ordered]@{
         lastBootUpTimeUtc = $lastBootUpTimeUtc
         markerSha256 = $bootMarkerSha256
     }
-    implementation = [ordered]@{
-        scriptSha256 = $scriptSha256
-        coreSha256 = $coreSha256
-    }
+    implementation = $implementationContract
     driverIdentity = [ordered]@{
         publishedName = $targetPublishedName
         originalInf = [string]$driverIdentity.OriginalInf
@@ -722,9 +919,14 @@ $integrityManifest = [ordered]@{
         className = [string]$driverIdentity.ClassName
         version = [string]$driverIdentity.Version
         targetDeviceCount = $targetBindings.Count
+        exportedInfSha256 = $exportedInfSha256
         exportedDriverSha256 = $exportedDriverSha256
         exportedCatalogSha256 = $exportedCatalogSha256
+        infSignatureStatus = [string]$exportedInfSignature.Status
+        driverSignatureStatus = [string]$exportedDriverSignature.Status
+        catalogSignatureStatus = [string]$exportedCatalogSignature.Status
         signaturesValid = $exportedPackageSigned
+        knownPackageHashesVerified = $knownPackageHashesVerified
         installedBinaryMatchesExport = $filterServiceBinaryMatchesExport
     }
     technicalPreflightPass = $technicalPreflightPass
@@ -740,6 +942,15 @@ $integrityManifest = [ordered]@{
         requireProtectedAcl = $true
     }
 }
+$finalizedPreflight = Get-Content -LiteralPath $preflightPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+if ([int]$finalizedPreflight.schemaVersion -ne 3) {
+    throw 'Only CRUW preflight schema version 3 can be sealed into the final integrity manifest'
+}
+$preflightImplementationJson = $finalizedPreflight.implementation | ConvertTo-Json -Depth 5 -Compress
+$manifestImplementationJson = $integrityManifest.implementation | ConvertTo-Json -Depth 5 -Compress
+if (-not [string]::Equals($preflightImplementationJson, $manifestImplementationJson, [StringComparison]::Ordinal)) {
+    throw 'Preflight and integrity manifest implementation contracts are not byte-identical'
+}
 $integrityManifestPath = Join-Path $recoveryPath 'backup-integrity-final.json'
 $secondaryIntegrityManifestPath = Join-Path $secondaryPath 'backup-integrity-final.json'
 $integrityManifestJson = $integrityManifest | ConvertTo-Json -Depth 6
@@ -748,6 +959,9 @@ Copy-Item -LiteralPath $integrityManifestPath -Destination $secondaryIntegrityMa
 $primaryIntegrityHash = (Get-FileHash -LiteralPath $integrityManifestPath -Algorithm SHA256).Hash
 $secondaryIntegrityHash = (Get-FileHash -LiteralPath $secondaryIntegrityManifestPath -Algorithm SHA256).Hash
 if ($primaryIntegrityHash -ne $secondaryIntegrityHash) { throw 'Final integrity manifest hashes do not match' }
+$sealedTreeFiles = @($finalRequiredBackupFiles) + @('backup-integrity-final.json')
+[void](Assert-CruwExactRecoveryTree -RootPath $recoveryPath -RequiredRelativeFiles $sealedTreeFiles)
+[void](Assert-CruwExactRecoveryTree -RootPath $secondaryPath -RequiredRelativeFiles $sealedTreeFiles)
 
 Set-CruwProtectedRecoveryTreeAcl -Path $recoveryPath
 Set-CruwProtectedRecoveryTreeAcl -Path $secondaryPath
@@ -762,6 +976,8 @@ Copy-Item -LiteralPath $preflightPath -Destination $latestPreflightPath -Force
 Set-CruwProtectedFileAcl -Path $latestPreflightPath
 $latestAcl = Test-CruwProtectedRecoveryAcl -Path $latestPreflightPath
 if (-not $latestAcl.Verified) { throw 'Latest preflight pointer does not have a protected ACL' }
+$allRecoveryAnchors = @($primaryParentAnchors) + @($secondaryParentAnchors) + @($primaryRecoveryAnchors) + @($secondaryRecoveryAnchors)
+Exit-CruwDirectoryAnchorChain -Anchors $allRecoveryAnchors
 $preflightJson
 
 if (-not $preflight.technicalPreflightPass) { exit 2 }

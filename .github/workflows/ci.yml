@@ -32,6 +32,20 @@ jobs:
           }
           if ($failed.Count) { throw ($failed -join [Environment]::NewLine) }
 
+      - name: Parse every PowerShell script — Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          $failed = @()
+          Get-ChildItem -Recurse -Filter *.ps1 | ForEach-Object {
+            $tokens = $null
+            $errors = $null
+            [Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$errors) | Out-Null
+            if (@($errors).Count) {
+              $failed += "${($_.FullName)}: $(@($errors).Message -join '; ')"
+            }
+          }
+          if ($failed.Count) { throw ($failed -join [Environment]::NewLine) }
+
       - name: Validate JSON evidence
         shell: pwsh
         run: |
@@ -54,6 +68,99 @@ jobs:
       - name: CRUWBlocker preflight invariant tests — Windows PowerShell 5.1
         shell: powershell
         run: .\tests\Test-CRUWBlockerPreflightCore.ps1
+
+      - name: Recovery-facilities preparer rejects missing confirmation
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          & pwsh -NoProfile -File .\src\powershell\maintenance\Prepare-CRUWRecoveryFacilities.ps1 2>$null
+          if ($LASTEXITCODE -eq 0) { throw 'Recovery-facilities preparer ran without explicit confirmation' }
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\src\powershell\maintenance\Prepare-CRUWRecoveryFacilities.ps1 2>$null
+          if ($LASTEXITCODE -eq 0) { throw 'Windows PowerShell recovery-facilities preparer ran without explicit confirmation' }
+
+      - name: CRUWBlocker transaction simulations — PowerShell 7
+        shell: pwsh
+        run: .\tests\Test-CRUWStateMachine.Simulated.ps1
+
+      - name: CRUWBlocker transaction simulations — Windows PowerShell 5.1
+        shell: powershell
+        run: .\tests\Test-CRUWStateMachine.Simulated.ps1
+
+      - name: CRUWBlocker cross-engine journal — PowerShell 7 host
+        shell: pwsh
+        run: .\tests\Test-CRUWCrossEngineJournal.ps1
+
+      - name: CRUWBlocker cross-engine journal — Windows PowerShell 5.1 host
+        shell: powershell
+        run: .\tests\Test-CRUWCrossEngineJournal.ps1
+
+      - name: Reject unsafe CRUW removal primitives
+        shell: pwsh
+        run: |
+          $paths = @(
+            '.\src\powershell\maintenance\CRUWStateMachine.Common.ps1',
+            '.\src\powershell\maintenance\Invoke-CRUWBlockerRemoval.ps1',
+            '.\src\powershell\maintenance\Repair-CRUWInterruptedRemoval.ps1',
+            '.\src\powershell\maintenance\Test-CRUWBlockerPostboot.ps1'
+          )
+          foreach ($path in $paths) {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+              throw "Required CRUW transaction source missing: $path"
+            }
+          }
+          $source = ($paths | ForEach-Object { Get-Content -LiteralPath $_ -Raw }) -join "`n"
+          $forbidden = [ordered]@{
+            force = '(?i)/force'
+            reboot = '(?i)Restart-Computer|shutdown\.exe|shutdown\.com'
+            manualRegistryOrServiceDelete = '(?i)Remove-ItemProperty|Set-ItemProperty|New-ItemProperty|reg\.exe\s+(?:add|delete)|sc\.exe\s+(?:delete|stop)'
+          }
+          foreach ($rule in $forbidden.GetEnumerator()) {
+            if ($source -match $rule.Value) { throw "Unsafe CRUW primitive detected: $($rule.Key)" }
+          }
+          $repairTokens = $null
+          $repairErrors = $null
+          $repairAst = [Management.Automation.Language.Parser]::ParseFile(
+            '.\src\powershell\maintenance\Repair-CRUWInterruptedRemoval.ps1',
+            [ref]$repairTokens,
+            [ref]$repairErrors
+          )
+          $repairAdapterCalls = @($repairAst.FindAll({
+            param($node)
+            return $node -is [Management.Automation.Language.CommandAst] -and
+              $node.GetCommandName() -ieq 'Invoke-CRUWAdapter'
+          }, $true))
+          $repairDynamicAdapterCalls = @($repairAdapterCalls | Where-Object {
+            $_.CommandElements.Count -lt 3 -or
+              -not ($_.CommandElements[2] -is [Management.Automation.Language.StringConstantExpressionAst])
+          })
+          if ($repairDynamicAdapterCalls.Count) {
+            throw 'Recovery adapter operation names must be literal so delete replay cannot evade static review'
+          }
+          $repairDeleteCalls = @($repairAdapterCalls | Where-Object {
+            [string]$_.CommandElements[2].Value -ieq 'DeleteDriver'
+          })
+          if ($repairDeleteCalls.Count) {
+            throw 'Recovery entrypoint must never replay driver deletion'
+          }
+          $entrypointPaths = @(
+            '.\src\powershell\maintenance\Invoke-CRUWBlockerRemoval.ps1',
+            '.\src\powershell\maintenance\Repair-CRUWInterruptedRemoval.ps1',
+            '.\src\powershell\maintenance\Test-CRUWBlockerPostboot.ps1'
+          )
+          $nativeMutationCommands = @('Suspend-BitLocker','Resume-BitLocker','pnputil','pnputil.exe','reagentc','reagentc.exe','Disable-ComputerRestore')
+          foreach ($entrypointPath in $entrypointPaths) {
+            $tokens = $null
+            $errors = $null
+            $ast = [Management.Automation.Language.Parser]::ParseFile($entrypointPath, [ref]$tokens, [ref]$errors)
+            $bypasses = @($ast.FindAll({
+              param($node)
+              $node -is [Management.Automation.Language.CommandAst] -and
+                $nativeMutationCommands -contains $node.GetCommandName()
+            }, $true))
+            if ($bypasses.Count) {
+              throw "Boot-critical entrypoint bypasses sealed adapter: $entrypointPath"
+            }
+          }
 
       - name: Sanitized exporter tests — PowerShell 7
         shell: pwsh

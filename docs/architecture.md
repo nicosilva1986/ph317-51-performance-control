@@ -47,6 +47,27 @@ Intel HWP / Windows power policy
         +--> EPP/boost policy, no custom multiplier daemon
 ```
 
+## Boot-storage driver transaction
+
+```text
+schema-v3 producer
+  -> dual sealed backup + six hashed implementation artifacts
+  -> removal executor (fresh boot/live gates)
+  -> bounded BitLocker suspension
+  -> one exact PnPUtil delete attempt
+  -> require exit 0/3010 plus independent exact live state
+  -> live classify: LEGACY_INTACT | CLEAN_PREBOOT | MIXED/BROKEN
+       | clean + all gates -> dual REBOOT_AUTHORIZED -> manual reboot
+       | legacy           -> protect BitLocker and close
+       | mixed            -> independently validate backup, then rollback
+  -> postboot validator -> STABILITY_PENDING | SAFE_RESIDUAL | PROTECTED_DIAGNOSTIC_HOLD
+  -> later distinct stable boot + separately reviewed baseline restoration -> COMPLETE
+```
+
+The journal is append-only and dual-root. Only the common byte-identical prefix is committed authority. Interruption recovery observes live state and never infers that an intent completed; specifically, it cannot replay driver deletion. A machine-wide protected mutex prevents concurrent writers, and entrypoints must execute from the sealed implementation directory.
+
+The current transaction intentionally stops at `POSTBOOT_STABILITY_PENDING`; it does not disable WinRE or System Restore on the first successful boot. Baseline restoration is a separate follow-up contract because disabling System Restore removes provisional restore points.
+
 ## Non-goals
 
 - direct embedded-controller register writes;
