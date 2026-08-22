@@ -1,7 +1,7 @@
 {
   "pollSeconds": 2,
   "enterSamples": 2,
-  "releaseSamples": 150,
+  "releaseSamples": 60,
   "sensorFailureSamples": 3,
   "rpmMismatchSamples": 2,
   "minMaxSeconds": 300,
