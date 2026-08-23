@@ -41,9 +41,10 @@ function Write-HeartbeatObject {
 }
 
 function Invoke-Probe {
-    param([int] $PreviousPendingCount = 0, [double] $PendingElapsedSeconds = 0)
+    param([int] $PreviousPendingCount = 0, [double] $PendingElapsedSeconds = 0, [int] $PreviousTransientCount = 0)
     $raw = & $engine -NoLogo -NoProfile -NonInteractive -File $watchdog -Root $testRoot -ProbeOnly `
-        -ProbePreviousPendingCount $PreviousPendingCount -ProbePendingElapsedSeconds $PendingElapsedSeconds
+        -ProbePreviousPendingCount $PreviousPendingCount -ProbePendingElapsedSeconds $PendingElapsedSeconds `
+        -ProbePreviousTransientCount $PreviousTransientCount
     $exitCode = $LASTEXITCODE
     return [pscustomobject]@{ exitCode = $exitCode; result = ($raw | ConvertFrom-Json) }
 }
@@ -108,6 +109,102 @@ try {
         throw 'START failure was incorrectly reported as a successful recovery.'
     }
     $cases.Add([ordered]@{ name = 'restart-failure-does-not-report-success'; status = 'PASS' })
+
+    $decisionAst = $watchdogAst.Find({
+        param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-HeartbeatRecoveryDecision'
+    }, $true)
+    if ($null -eq $decisionAst) { throw 'The production heartbeat recovery decision function is missing.' }
+    Invoke-Expression $decisionAst.Extent.Text
+
+    # A heartbeat the watchdog could not read is not evidence that the controller stopped. One
+    # lost read race must not tear the primary down; the second consecutive one must.
+    $decision = Get-HeartbeatRecoveryDecision -Disposition TRANSIENT -PreviousPendingCount 0 `
+        -PendingElapsedSeconds 0 -VerifyMaxAfterSeconds 12 -PreviousTransientCount 0 -TransientTolerance 2
+    if ($decision.action -ne 'WAIT_PRIMARY' -or [int]$decision.nextTransientCount -ne 1) {
+        throw 'A single unreadable heartbeat restarted the primary.'
+    }
+    $cases.Add([ordered]@{ name = 'single-unreadable-heartbeat-defers-restart'; status = 'PASS' })
+
+    $decision = Get-HeartbeatRecoveryDecision -Disposition TRANSIENT -PreviousPendingCount 0 `
+        -PendingElapsedSeconds 0 -VerifyMaxAfterSeconds 12 -PreviousTransientCount 1 -TransientTolerance 2
+    if ($decision.action -ne 'QUIESCE_MAX_RESTART' -or [int]$decision.nextTransientCount -ne 2) {
+        throw 'A primary that never publishes a readable heartbeat was never recovered.'
+    }
+    $cases.Add([ordered]@{ name = 'repeated-unreadable-heartbeat-recovers'; status = 'PASS' })
+
+    # Substantive failures keep their undebounced path: the tolerance must not slow real recovery.
+    $decision = Get-HeartbeatRecoveryDecision -Disposition FATAL -PreviousPendingCount 0 `
+        -PendingElapsedSeconds 0 -VerifyMaxAfterSeconds 12 -PreviousTransientCount 0 -TransientTolerance 2
+    if ($decision.action -ne 'QUIESCE_MAX_RESTART' -or [int]$decision.nextTransientCount -ne 0) {
+        throw 'The transient tolerance delayed recovery from a substantive heartbeat failure.'
+    }
+    $cases.Add([ordered]@{ name = 'fatal-heartbeat-recovers-without-debounce'; status = 'PASS' })
+
+    # The restart verification must be satisfiable by a controller that is in fact running.
+    # Requiring five consecutive Running samples inside five seconds was not, so every recovery
+    # reported failure and left the fans at MAX with no primary.
+    $startAst = $watchdogAst.Find({
+        param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Start-TrustedPrimaryTask'
+    }, $true)
+    if ($null -eq $startAst) { throw 'The trusted primary start function is missing.' }
+    $startText = $startAst.Extent.Text
+    if ($startText -notmatch 'Test-PrimaryHeartbeatNewerThan' -or
+        $startText -notmatch '\$PrimaryStartTimeoutSeconds' -or
+        $startText -match 'TotalSeconds\s+-lt\s+5\b') {
+        throw 'Restart verification can again report failure while the primary is alive.'
+    }
+    $cases.Add([ordered]@{ name = 'restart-verification-accepts-live-primary'; status = 'PASS' })
+
+    # Repeating a restart that cannot work leaves the fans at MAX indefinitely, so consecutive
+    # failures must escalate to rebuilding the task from the trusted definition.
+    $recoveryAst = $watchdogAst.Find({
+        param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Invoke-EmergencyRecovery'
+    }, $true)
+    if ($null -eq $recoveryAst) { throw 'The emergency recovery function is missing.' }
+
+    $recoveryTrace = [Collections.Generic.List[string]]::new()
+    $script:ConsecutiveRecoveryFailures = 0
+    $RecoveryReregisterThreshold = 3
+    function Write-WatchdogEvent { param([string] $Event, [string] $Detail = '') [void]$recoveryTrace.Add($Event) }
+    function Register-TrustedPrimaryTask { [void]$recoveryTrace.Add('REREGISTER') }
+    function Stop-PrimaryAndAcquireControllerLease { 'lease' }
+    function Set-EmergencyMax { }
+    function Release-ControllerLease { param($Lease) }
+    function Start-TrustedPrimaryTask { }
+    function Invoke-WatchdogRecoveryAction {
+        param($Action, $Reason, $StopPrimary, $RequestMax, $ReleasePrimary, $StartPrimary)
+        return [pscustomobject]@{ outcome = 'RECOVERY_FAILED'; resetPending = $false; detail = 'stubbed failure' }
+    }
+    Invoke-Expression $recoveryAst.Extent.Text
+
+    1..3 | ForEach-Object { [void](Invoke-EmergencyRecovery -Reason 'stubbed recovery') }
+    if (@($recoveryTrace | Where-Object { $_ -eq 'primary_recovery_error' }).Count -ne 3 -or
+        @($recoveryTrace | Where-Object { $_ -eq 'REREGISTER' }).Count -ne 1 -or
+        @($recoveryTrace | Where-Object { $_ -eq 'primary_task_reregistered' }).Count -ne 1 -or
+        $script:ConsecutiveRecoveryFailures -ne 0) {
+        throw "Repeated recovery failures did not escalate to a task rebuild: $($recoveryTrace -join ',')"
+    }
+    $cases.Add([ordered]@{ name = 'repeated-recovery-failure-rebuilds-task'; status = 'PASS' })
+
+    $recoveryTrace.Clear()
+    $script:ConsecutiveRecoveryFailures = 0
+    function Invoke-WatchdogRecoveryAction {
+        param($Action, $Reason, $StopPrimary, $RequestMax, $ReleasePrimary, $StartPrimary)
+        return [pscustomobject]@{ outcome = 'PRIMARY_RESTARTED'; resetPending = $true; detail = 'OK' }
+    }
+    1..4 | ForEach-Object { [void](Invoke-EmergencyRecovery -Reason 'stubbed recovery') }
+    if (@($recoveryTrace | Where-Object { $_ -eq 'REREGISTER' }).Count -ne 0 -or
+        @($recoveryTrace | Where-Object { $_ -eq 'primary_restarted' }).Count -ne 4) {
+        throw "Successful recoveries were counted towards the rebuild threshold: $($recoveryTrace -join ',')"
+    }
+    $cases.Add([ordered]@{ name = 'successful-recovery-resets-rebuild-counter'; status = 'PASS' })
+
+    Remove-Item Function:\Write-WatchdogEvent, Function:\Register-TrustedPrimaryTask, Function:\Invoke-WatchdogRecoveryAction,
+        Function:\Stop-PrimaryAndAcquireControllerLease, Function:\Set-EmergencyMax, Function:\Release-ControllerLease,
+        Function:\Start-TrustedPrimaryTask, Function:\Invoke-EmergencyRecovery -ErrorAction SilentlyContinue
 
     $continueAsts = @($watchdogAst.FindAll({ param($node) $node -is [Management.Automation.Language.ContinueStatementAst] }, $true))
     $integrityFailureIf = $watchdogAst.Find({
@@ -215,6 +312,38 @@ try {
     $probe = Invoke-Probe
     if ($probe.exitCode -eq 0 -or $probe.result.health.valid) { throw 'Missing heartbeat did not fail closed.' }
     $cases.Add([ordered]@{ name = 'missing-status-fails-closed'; status = 'PASS' })
+
+    # It fails closed as a transient read failure, so the first observation waits and the second
+    # recovers. The controller republishes this file every poll; one lost race is not a death.
+    if ($probe.result.health.disposition -ne 'TRANSIENT' -or $probe.result.decision.action -ne 'WAIT_PRIMARY' -or
+        [int]$probe.result.decision.nextTransientCount -ne 1) {
+        throw 'An unreadable heartbeat was classified as a substantive failure.'
+    }
+    $cases.Add([ordered]@{ name = 'missing-status-is-transient'; status = 'PASS' })
+
+    $probe = Invoke-Probe -PreviousTransientCount 1
+    if ($probe.result.decision.action -ne 'QUIESCE_MAX_RESTART' -or [int]$probe.result.decision.nextTransientCount -ne 2) {
+        throw 'A persistently unreadable heartbeat never reached recovery.'
+    }
+    $cases.Add([ordered]@{ name = 'persistently-missing-status-recovers'; status = 'PASS' })
+
+    Set-Content -LiteralPath (Join-Path $testRoot 'adaptive-fan-status.json') -Value '' -Encoding utf8
+    $probe = Invoke-Probe
+    if ($probe.exitCode -eq 0 -or $probe.result.health.valid -or $probe.result.health.disposition -ne 'TRANSIENT') {
+        throw 'An empty heartbeat was not treated as a transient read failure.'
+    }
+    $cases.Add([ordered]@{ name = 'empty-status-is-transient'; status = 'PASS' })
+
+    # A heartbeat that reads cleanly but is old is real evidence of a stopped controller, so it
+    # must still recover on the first observation.
+    Write-Heartbeat -State MAX -Health HEALTHY_VERIFIED -Behavior 512 -CpuRpm 6122 -GpuRpm 6122 `
+        -UpdatedAt ([datetimeoffset]::Now.AddSeconds(-120))
+    $probe = Invoke-Probe
+    if ($probe.exitCode -eq 0 -or $probe.result.health.disposition -ne 'FATAL' -or
+        $probe.result.decision.action -ne 'QUIESCE_MAX_RESTART') {
+        throw 'A stale heartbeat no longer recovers on its first observation.'
+    }
+    $cases.Add([ordered]@{ name = 'stale-status-recovers-immediately'; status = 'PASS' })
 
     '{broken-manifest' | Set-Content -LiteralPath (Join-Path $testRoot 'integrity.json') -Encoding utf8
     $probe = Invoke-Probe
