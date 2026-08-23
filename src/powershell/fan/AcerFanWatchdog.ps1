@@ -97,6 +97,10 @@ function Get-IntegrityState {
         if ($null -eq $minimumRpmProperty) { throw 'minimumMaxRpm is absent from the protected configuration.' }
         $minimumRpm = [int]$minimumRpmProperty.Value
         if ($minimumRpm -lt 1000 -or $minimumRpm -gt 10000) { throw 'minimumMaxRpm is outside its safety range.' }
+        $curveRpmProperty = $configuration.PSObject.Properties['curveMinimumVerifiedRpm']
+        if ($null -eq $curveRpmProperty) { throw 'curveMinimumVerifiedRpm is absent from the protected configuration.' }
+        $curveMinimumRpm = [int]$curveRpmProperty.Value
+        if ($curveMinimumRpm -lt 500 -or $curveMinimumRpm -gt $minimumRpm) { throw 'curveMinimumVerifiedRpm is outside its safety range.' }
         $verifyProperty = $configuration.PSObject.Properties['verifyMaxAfterSeconds']
         if ($null -eq $verifyProperty) { throw 'verifyMaxAfterSeconds is absent from the protected configuration.' }
         $verifyRaw = [double]$verifyProperty.Value
@@ -226,14 +230,14 @@ function Get-PrimaryStatusHealth {
         if ($ageSeconds -gt $HeartbeatMaximumAgeSeconds) { throw "Primary heartbeat is stale by $([math]::Round($ageSeconds,1)) seconds." }
         if ($ageSeconds -lt -$MaximumFutureSkewSeconds) { throw "Primary heartbeat is $([math]::Round(-$ageSeconds,1)) seconds in the future." }
         $state = [string]$status.state
-        if ($state -notin @('AUTO', 'MAX')) { throw "Primary state is invalid: $state" }
+        if ($state -notin @('AUTO', 'MAX', 'CURVE')) { throw "Primary state is invalid: $state" }
         $behaviorBitmap = [uint32](Get-RequiredUnsignedInteger -InputObject $status -Name 'fanBehaviorBitmap' -Maximum ([uint32]::MaxValue))
         $mode = ($behaviorBitmap -shr 8) -band 3
         $healthCode = [string]$status.status
         $result.status = $status
         if ($healthCode -eq 'REASSERT_PENDING') {
-            if ($state -ne 'MAX') {
-                throw 'REASSERT_PENDING is transient only while the primary state is MAX.'
+            if ($state -eq 'AUTO') {
+                throw 'REASSERT_PENDING is transient only while the primary is driving the fans.'
             }
             foreach ($name in @('cpuFanRpm', 'gpuFanRpm')) {
                 [void](Get-RequiredUnsignedInteger -InputObject $status -Name $name -Maximum ([int32]::MaxValue))
@@ -246,6 +250,18 @@ function Get-PrimaryStatusHealth {
 
         if ($state -eq 'AUTO') {
             if ($mode -ne 1) { throw "AUTO state does not match firmware mode $mode." }
+        }
+        elseif ($state -eq 'CURVE') {
+            $cpuFanRpm = Get-RequiredUnsignedInteger -InputObject $status -Name 'cpuFanRpm' -Maximum ([int32]::MaxValue)
+            $gpuFanRpm = Get-RequiredUnsignedInteger -InputObject $status -Name 'gpuFanRpm' -Maximum ([int32]::MaxValue)
+            # Firmware mode 3 is CUSTOM. The percent-to-RPM relationship has not been measured on
+            # this hardware, so the gate asserts the mode and a floor proving the fans are turning,
+            # not a predicted RPM for the commanded percentage.
+            if ($mode -ne 3) { throw "CURVE state does not match firmware mode $mode." }
+            $curveMinimumRpm = [int]$Configuration.curveMinimumVerifiedRpm
+            if ($cpuFanRpm -lt $curveMinimumRpm -or $gpuFanRpm -lt $curveMinimumRpm) {
+                throw "CURVE fan RPM is below $curveMinimumRpm."
+            }
         }
         else {
             $cpuFanRpm = Get-RequiredUnsignedInteger -InputObject $status -Name 'cpuFanRpm' -Maximum ([int32]::MaxValue)

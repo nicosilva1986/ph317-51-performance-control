@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Added an optional proportional fan band so demand no longer means 6122 RPM. Firmware CUSTOM mode (fan mode 3) carries a real percentage, and the controller interpolates it linearly from the hotter of the CPU and GPU sensors. Measured motivation: 59.6 % of a 35.5-hour window at maximum RPM with a median CPU temperature of 42 °C.
+- Borrowed the shape from established fan controllers: linear interpolation with clamping (lm-sensors `fancontrol`), a moving average over the temperature source, asymmetric response — immediate increases, damped decreases — and a falling hysteresis measured from the lower edge of the current step (FanControl), plus a `curveStartPct` spin-up floor (`MINSTART`).
+- Kept the policy behind `curveEnabled`, which ships **false**. With it off the controller is behaviourally identical to the AUTO/MAX policy, which the 26 pre-existing simulation cases still prove.
+- Taught the watchdog that `CURVE` is a legitimate driving state, verified against firmware mode 3 and a `curveMinimumVerifiedRpm` floor. Without this every proportional episode would read as a dead controller and be answered with MAX.
+- Left the `0x00C30009` CUSTOM payload and the percent-to-RPM relationship unvalidated on real hardware; that measurement is still outstanding and is why the curve ships disabled.
+
 - Fixed a watchdog recovery loop that held the fans at maximum RPM. Over a measured 35.5-hour window the machine spent 59.6 % of its time in `MAX` with a median CPU temperature of 42 °C during that time; 32 of 68 `MAX` episodes began at a controller restart and 30 of those 32 restarts coincided with a watchdog recovery event.
 - Classified an unreadable heartbeat as transient instead of fatal. Absent, empty or unparseable status documents are debounced across `TransientHeartbeatTolerance` consecutive polls; stale, malformed or semantically invalid heartbeats keep recovering on first observation.
 - Published the controller heartbeat with an atomic `File.Replace` and read it sharing write and delete, closing the `Move-Item -Force` window that made the watchdog observe its own reader race as a dead controller.

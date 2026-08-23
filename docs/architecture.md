@@ -22,6 +22,15 @@ Current performance-first candidate:
   - any logical CPU ≥70 %;
   - rise ≥4 °C in 6 seconds after reaching 55 °C;
 - immediate `MAX` at CPU/GPU ≥75 °C or system ≥70 °C;
+- optional proportional band (`curveEnabled`, ships **false**): when demand is not critical the
+  controller drives firmware CUSTOM mode at an interpolated percentage instead of 100 %. Linear
+  between `curveMinTempC`/`curveMinPct` and `curveMaxTempC`/`curveMaxPct`, driven by the hotter of
+  the CPU and GPU sensors averaged over `curveAverageSamples` polls, quantised upward to
+  `curveStepPct`. Increases apply on the sample that justifies them; reductions wait
+  `curveDecreaseHoldSeconds` and then a further `curveDecreaseHysteresisC` below the temperature
+  that still justified the previous step. `curveStartPct` is the spin-up floor for the first
+  command. Critical temperature, sensor failure, readback failure and every watchdog recovery path
+  keep commanding 100 %, so the fail-closed guarantee is unchanged;
 - fail-safe `MAX` after 3 invalid samples;
 - minimum `MAX` residence: 5 minutes for every `MAX` entered from a trigger;
 - the `MAX` adopted at process start, before the controller has read a single sample, is an unproven fail-safe default rather than a response to measured heat. It uses the separate `startupMinMaxSeconds` floor (60 s) and still requires the full 2 minutes of qualifying idle samples, so it releases on verified cool telemetry instead of holding the fans at 6122 RPM for 5 minutes after every restart. Any trigger firing during that window promotes the hold to the full 5-minute residence;

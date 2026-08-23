@@ -366,6 +366,72 @@ try {
         $cases.Add([ordered]@{ name = "verify-max-bound-$invalidVerifySeconds-fails-closed"; status = 'PASS' })
     }
 
+    # --- proportional curve state -------------------------------------------------------
+    # Firmware mode 3 is CUSTOM. The watchdog has to accept it as a legitimate driving state,
+    # otherwise every proportional episode reads as a dead controller and is answered with MAX.
+    Restore-Fixture
+    Write-Heartbeat -State CURVE -Health HEALTHY_VERIFIED -Behavior 768 -CpuRpm 3200 -GpuRpm 3100
+    $probe = Invoke-Probe
+    if ($probe.exitCode -ne 0 -or -not $probe.result.health.valid -or
+        $probe.result.health.disposition -ne 'HEALTHY_VERIFIED') {
+        throw "A healthy proportional heartbeat was rejected: $($probe.result.health.detail)"
+    }
+    $cases.Add([ordered]@{ name = 'healthy-curve'; status = 'PASS' })
+
+    Write-Heartbeat -State CURVE -Health HEALTHY_VERIFIED -Behavior 512 -CpuRpm 6122 -GpuRpm 6122
+    $probe = Invoke-Probe
+    if ($probe.exitCode -eq 0 -or $probe.result.health.valid -or
+        [string]$probe.result.health.detail -notmatch 'CURVE state does not match firmware mode') {
+        throw 'A CURVE heartbeat reporting a non-custom firmware mode did not fail closed.'
+    }
+    $cases.Add([ordered]@{ name = 'curve-mode-mismatch-fails-closed'; status = 'PASS' })
+
+    Write-Heartbeat -State CURVE -Health HEALTHY_VERIFIED -Behavior 768 -CpuRpm 900 -GpuRpm 3100
+    $probe = Invoke-Probe
+    if ($probe.exitCode -eq 0 -or $probe.result.health.valid -or
+        [string]$probe.result.health.detail -notmatch 'CURVE fan RPM is below') {
+        throw 'A CURVE heartbeat with a stalled fan did not fail closed.'
+    }
+    $cases.Add([ordered]@{ name = 'curve-stalled-fan-fails-closed'; status = 'PASS' })
+
+    # A curve transition awaiting its firmware readback gets the same grace as a MAX transition,
+    # rather than the immediate fatal path reserved for AUTO.
+    Write-Heartbeat -State CURVE -Health REASSERT_PENDING -Behavior 256 -CpuRpm 1800 -GpuRpm 1700
+    $probe = Invoke-Probe
+    if ($probe.result.health.disposition -ne 'REASSERT_PENDING' -or $probe.result.decision.action -ne 'WAIT_PRIMARY') {
+        throw 'A fresh curve transition did not keep the primary as the authoritative writer.'
+    }
+    $cases.Add([ordered]@{ name = 'curve-reassert-pending-defers-restart'; status = 'PASS' })
+
+    Restore-Fixture
+    $curveConfigPath = Join-Path $testRoot 'fan-controller-config.json'
+    $curveConfig = Get-Content -LiteralPath $curveConfigPath -Raw | ConvertFrom-Json
+    $curveConfig.PSObject.Properties.Remove('curveMinimumVerifiedRpm')
+    $curveConfig | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $curveConfigPath -Encoding utf8
+    Update-FixtureManifest
+    Write-Heartbeat -State CURVE -Health HEALTHY_VERIFIED -Behavior 768 -CpuRpm 3200 -GpuRpm 3100
+    $probe = Invoke-Probe
+    if ($probe.exitCode -eq 0 -or $probe.result.integrity.valid -or
+        [string]$probe.result.integrity.detail -notmatch 'curveMinimumVerifiedRpm') {
+        throw 'A configuration without the curve RPM floor was accepted.'
+    }
+    $cases.Add([ordered]@{ name = 'missing-curve-floor-fails-closed'; status = 'PASS' })
+
+    foreach ($invalidCurveRpm in @(400, 6000)) {
+        Restore-Fixture
+        $curveConfig = Get-Content -LiteralPath $curveConfigPath -Raw | ConvertFrom-Json
+        $curveConfig.curveMinimumVerifiedRpm = $invalidCurveRpm
+        $curveConfig | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $curveConfigPath -Encoding utf8
+        Update-FixtureManifest
+        Write-Heartbeat -State CURVE -Health HEALTHY_VERIFIED -Behavior 768 -CpuRpm 3200 -GpuRpm 3100
+        $probe = Invoke-Probe
+        if ($probe.exitCode -eq 0 -or $probe.result.integrity.valid -or
+            [string]$probe.result.integrity.detail -notmatch 'curveMinimumVerifiedRpm') {
+            throw "Unsafe curveMinimumVerifiedRpm=$invalidCurveRpm was accepted."
+        }
+        $cases.Add([ordered]@{ name = "curve-floor-bound-$invalidCurveRpm-fails-closed"; status = 'PASS' })
+    }
+
     Restore-Fixture
     Add-Content -LiteralPath (Join-Path $testRoot 'fan-controller-config.json') -Value ' '
     $probe = Invoke-Probe
