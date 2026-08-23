@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Recalibrated the fan policy so maximum RPM means a machine that is genuinely hot and genuinely busy. Demand now needs CPU ≥72 °C (was 60 °C), or a logical core ≥95 % (was 70 %) sustained for 20 seconds (was 4 seconds), across 3 consecutive samples (was 2). Critical stays immediate at 85 °C (was 75 °C).
+- Made the release envelope reachable. It was CPU ≤55 °C with 2 minutes of unbroken idle, and a normally loaded machine crosses 55 °C every minute or two, so the countdown was reset before it could finish. Now CPU ≤65 °C with 60 seconds, and the minimum MAX residence drops from 5 minutes to 2.
+- Kept `preemptTemperatureC` (62 °C) below `releaseCpuC` (65 °C) on purpose: above it, the thermal-envelope check would always fire first and the rapid-rise trigger would be unreachable.
+- Derived the controller simulation fixtures from the policy instead of hard-coding them, so a future recalibration does not mean rewriting forty cases by hand, and added contract assertions that reject a calibration which would again force MAX on a warm idle.
+
 - Added an optional proportional fan band so demand no longer means 6122 RPM. Firmware CUSTOM mode (fan mode 3) carries a real percentage, and the controller interpolates it linearly from the hotter of the CPU and GPU sensors. Measured motivation: 59.6 % of a 35.5-hour window at maximum RPM with a median CPU temperature of 42 °C.
 - Borrowed the shape from established fan controllers: linear interpolation with clamping (lm-sensors `fancontrol`), a moving average over the temperature source, asymmetric response — immediate increases, damped decreases — and a falling hysteresis measured from the lower edge of the current step (FanControl), plus a `curveStartPct` spin-up floor (`MINSTART`).
 - Kept the policy behind `curveEnabled`, which ships **false**. With it off the controller is behaviourally identical to the AUTO/MAX policy, which the 26 pre-existing simulation cases still prove.
