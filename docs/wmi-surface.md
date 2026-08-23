@@ -66,6 +66,13 @@ bits 22–23  GPU mode (2-bit field)
 |---|---|---|
 | **MAX** | `0x00820009` | bitmap `0x0009` + CPU mode 2 (`<< 16`) + GPU mode 2 (`<< 22`) |
 | **AUTO** | `0x00410009` | bitmap `0x0009` + CPU mode 1 (`<< 16`) + GPU mode 1 (`<< 22`) |
+| **CURVE** | `0x00C30009` | bitmap `0x0009` + CPU mode 3 (`<< 16`) + GPU mode 3 (`<< 22`) |
+
+Mode 3 is CUSTOM. It is what makes `SetGamingFanSpeed` carry a real percentage
+instead of the fixed 100 % that MAX writes. **The `0x00C30009` payload and the
+mode-3 readback have not been exercised on the reference machine yet**; the
+controller keeps the proportional band behind `curveEnabled`, which ships false,
+until they are. Do not assume they are validated because the code exists.
 
 Success condition: method `gmOutput` status field is `0`.
 
@@ -111,6 +118,12 @@ bits 8–15  speed percent (0–100)
 |---|---|
 | CPU | `0x00006401` (100 % + ID 0x01) |
 | GPU | `0x00006404` (100 % + ID 0x04) |
+
+For the proportional band the same layout carries the commanded percentage:
+`(percent << 8) | 0x01` for the CPU fan and `(percent << 8) | 0x04` for the GPU
+fan. `0x00003201` is therefore CPU at 50 %. The percent-to-RPM relationship on
+this chassis is **unmeasured**, which is why the curve health gate asserts the
+firmware mode plus a `curveMinimumVerifiedRpm` floor rather than a predicted RPM.
 
 AUTO does not call `SetGamingFanSpeed`; the firmware restores its
 automatic curve after `SetGamingFanBehavior` with mode AUTO.
@@ -201,8 +214,9 @@ saved by PredatorSense,” not a live percent write.
 ## Non-goals of this surface
 
 - Direct embedded-controller register I/O
-- Arbitrary custom percent curves on every poll (Max is forced 100 %;
-  Auto is firmware-owned)
+- Rewriting the percentage on every poll. The curve is quantised to `curveStepPct`
+  and damped by a dwell and a falling hysteresis, so writes happen on genuine
+  steps, not per sample.
 - RGB, LED, overclock, or misc-setting methods
 - Assuming the same sensor command words on untested models
 

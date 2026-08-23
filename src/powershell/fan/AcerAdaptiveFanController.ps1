@@ -119,8 +119,24 @@ function Read-HardwareSample {
 }
 
 function Set-HardwareFanProfile {
-    param([ValidateSet('AUTO', 'MAX')] [string] $Profile)
+    param(
+        [ValidateSet('AUTO', 'MAX', 'CURVE')] [string] $Profile,
+        [ValidateRange(0, 100)] [int] $Percent = 100
+    )
     if ($null -eq $script:Gaming) { return }
+
+    if ($Profile -eq 'CURVE') {
+        # Firmware fan mode 3 is CUSTOM. In that mode SetGamingFanSpeed carries a real percentage
+        # in bits 8-15 instead of the fixed 100 % that MAX writes, which is what makes a
+        # proportional curve possible at all. Bitmap 0x0009 is CPU + GPU, as for the other modes.
+        $behavior = Invoke-CimMethod -InputObject $script:Gaming -MethodName 'SetGamingFanBehavior' -Arguments @{ gmInput = [uint64]0x00C30009 }
+        $cpu = Invoke-CimMethod -InputObject $script:Gaming -MethodName 'SetGamingFanSpeed' -Arguments @{ gmInput = [uint64]((([uint64]$Percent) -shl 8) -bor 0x01) }
+        $gpu = Invoke-CimMethod -InputObject $script:Gaming -MethodName 'SetGamingFanSpeed' -Arguments @{ gmInput = [uint64]((([uint64]$Percent) -shl 8) -bor 0x04) }
+        if ([uint32]$behavior.gmOutput -ne 0 -or [uint32]$cpu.gmOutput -ne 0 -or [uint32]$gpu.gmOutput -ne 0) {
+            throw "Acer firmware rejected the CURVE fan command at $Percent %."
+        }
+        return
+    }
 
     if ($Profile -eq 'MAX') {
         $behavior = Invoke-CimMethod -InputObject $script:Gaming -MethodName 'SetGamingFanBehavior' -Arguments @{ gmInput = [uint64]0x00820009 }
@@ -194,6 +210,85 @@ function Set-VerifiedAutoProfile {
     throw "AUTO firmware readback verification failed. $lastDetail $fallbackDetail"
 }
 
+function Get-CurveTargetPercent {
+    param([double] $TemperatureC, [Parameter(Mandatory)] $Configuration)
+
+    $minTemp = [double]$Configuration.curveMinTempC
+    $maxTemp = [double]$Configuration.curveMaxTempC
+    $minPct = [double]$Configuration.curveMinPct
+    $maxPct = [double]$Configuration.curveMaxPct
+
+    $raw = if ($TemperatureC -le $minTemp) { $minPct }
+        elseif ($TemperatureC -ge $maxTemp) { $maxPct }
+        else { $minPct + ($maxPct - $minPct) * (($TemperatureC - $minTemp) / ($maxTemp - $minTemp)) }
+
+    # Quantise upward. Rounding to the nearest step would sometimes command less cooling than the
+    # curve asks for; rounding up never does, and the steps keep the controller from rewriting the
+    # percentage on every poll for a fraction of a degree.
+    $step = [double]$Configuration.curveStepPct
+    $stepped = [math]::Ceiling($raw / $step) * $step
+    if ($stepped -gt $maxPct) { $stepped = $maxPct }
+    if ($stepped -lt $minPct) { $stepped = $minPct }
+    return [int]$stepped
+}
+
+function Get-CurveReleaseTemperature {
+    param([int] $Percent, [Parameter(Mandatory)] $Configuration)
+
+    # The lower edge of the temperature band that still maps to $Percent once the curve has been
+    # quantised upward. Below this the curve already commands one step less, so this is the point
+    # the falling hysteresis is measured from. Inverting $Percent directly would instead return the
+    # top of the band and make the hysteresis window collapse.
+    $minTemp = [double]$Configuration.curveMinTempC
+    $maxTemp = [double]$Configuration.curveMaxTempC
+    $minPct = [double]$Configuration.curveMinPct
+    $maxPct = [double]$Configuration.curveMaxPct
+    $edge = [double]$Percent - [double]$Configuration.curveStepPct
+    if ($edge -le $minPct) { return $minTemp }
+    if ($edge -ge $maxPct) { return $maxTemp }
+    return $minTemp + ($maxTemp - $minTemp) * (($edge - $minPct) / ($maxPct - $minPct))
+}
+
+function Get-CurveCommand {
+    param(
+        [double] $AveragedTemperatureC,
+        [int] $CurrentPercent,
+        [double] $SecondsSinceLastChange,
+        [Parameter(Mandatory)] $Configuration
+    )
+
+    $target = Get-CurveTargetPercent -TemperatureC $AveragedTemperatureC -Configuration $Configuration
+
+    if ($CurrentPercent -le 0) {
+        # MINSTART: the first command after the fans were firmware-owned has to be high enough to
+        # spin them up reliably, even when the curve alone would ask for less.
+        $start = [int]$Configuration.curveStartPct
+        $percent = if ($target -lt $start) { $start } else { $target }
+        return [pscustomobject]@{ percent = $percent; changed = $true; reason = 'curve_start' }
+    }
+
+    if ($target -gt $CurrentPercent) {
+        # More cooling is never delayed. Only reductions are damped.
+        return [pscustomobject]@{ percent = $target; changed = $true; reason = 'curve_increase' }
+    }
+
+    if ($target -lt $CurrentPercent) {
+        if ($SecondsSinceLastChange -lt [double]$Configuration.curveDecreaseHoldSeconds) {
+            return [pscustomobject]@{ percent = $CurrentPercent; changed = $false; reason = 'curve_decrease_hold' }
+        }
+        # Falling hysteresis: step down only once the average has dropped a further
+        # curveDecreaseHysteresisC below the temperature that still justifies the current percent.
+        # Without this an intermittent workload makes the fans audibly pump up and down.
+        $releaseTemperature = Get-CurveReleaseTemperature -Percent $CurrentPercent -Configuration $Configuration
+        if ($AveragedTemperatureC -gt ($releaseTemperature - [double]$Configuration.curveDecreaseHysteresisC)) {
+            return [pscustomobject]@{ percent = $CurrentPercent; changed = $false; reason = 'curve_decrease_hysteresis' }
+        }
+        return [pscustomobject]@{ percent = $target; changed = $true; reason = 'curve_decrease' }
+    }
+
+    return [pscustomobject]@{ percent = $CurrentPercent; changed = $false; reason = 'curve_steady' }
+}
+
 function Assert-ControllerConfiguration {
     param([Parameter(Mandatory)] $Configuration)
 
@@ -205,6 +300,16 @@ function Assert-ControllerConfiguration {
         rpmMismatchSamples = @(1, 30)
         minMaxSeconds = @(0, 7200)
         startupMinMaxSeconds = @(0, 7200)
+        curveMinTempC = @(30, 95)
+        curveMaxTempC = @(35, 100)
+        curveMinPct = @(10, 100)
+        curveMaxPct = @(50, 100)
+        curveStartPct = @(10, 100)
+        curveStepPct = @(1, 25)
+        curveAverageSamples = @(1, 60)
+        curveDecreaseHysteresisC = @(0, 20)
+        curveDecreaseHoldSeconds = @(0, 600)
+        curveMinimumVerifiedRpm = @(500, 10000)
         rpmReassertMinIntervalSeconds = @(1, 300)
         verifyMaxAfterSeconds = @(1, 300)
         telemetryEverySamples = @(1, 3600)
@@ -255,11 +360,27 @@ function Assert-ControllerConfiguration {
     if ([double]$Configuration.temperatureWindowSeconds -lt [double]$Configuration.pollSeconds) { throw 'temperatureWindowSeconds must be at least pollSeconds.' }
     if ([double]$Configuration.releaseCpuLoadPct -ge [double]$Configuration.preemptCpuLoadPct) { throw 'releaseCpuLoadPct must be lower than preemptCpuLoadPct.' }
     if ([double]$Configuration.startupMinMaxSeconds -gt [double]$Configuration.minMaxSeconds) { throw 'startupMinMaxSeconds must not exceed minMaxSeconds.' }
+
+    $curveEnabledProperty = $Configuration.PSObject.Properties['curveEnabled']
+    if ($null -eq $curveEnabledProperty -or $curveEnabledProperty.Value -isnot [bool]) {
+        throw 'curveEnabled must be present and boolean.'
+    }
+    if ([double]$Configuration.curveMinTempC -ge [double]$Configuration.curveMaxTempC) { throw 'curveMinTempC must be lower than curveMaxTempC.' }
+    if ([double]$Configuration.curveMinPct -gt [double]$Configuration.curveMaxPct) { throw 'curveMinPct must not exceed curveMaxPct.' }
+    if ([double]$Configuration.curveStartPct -lt [double]$Configuration.curveMinPct) { throw 'curveStartPct must not be lower than curveMinPct.' }
+    if ([double]$Configuration.curveStartPct -gt [double]$Configuration.curveMaxPct) { throw 'curveStartPct must not exceed curveMaxPct.' }
+    # The curve must already be at full speed before the critical threshold takes over, otherwise
+    # there is a band where the machine is critically hot and the fans are still proportional.
+    if ([double]$Configuration.curveMaxTempC -gt [double]$Configuration.criticalCpuC) { throw 'curveMaxTempC must not exceed criticalCpuC.' }
+    if ([double]$Configuration.curveMinimumVerifiedRpm -gt [double]$Configuration.minimumMaxRpm) { throw 'curveMinimumVerifiedRpm must not exceed minimumMaxRpm.' }
 }
 
 if (-not (Test-Path -LiteralPath $ConfigPath)) { throw "Configuration not found: $ConfigPath" }
 $script:Config = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
 Assert-ControllerConfiguration -Configuration $script:Config
+# Off by default. With curveEnabled false every path below behaves exactly as the AUTO/MAX
+# controller did, so the proportional band cannot activate without an explicit decision.
+$script:CurveEnabled = [bool]$script:Config.curveEnabled
 if ($ValidateOnly) {
     [ordered]@{ status = 'VALID'; configPath = $ConfigPath } | ConvertTo-Json -Compress
     exit 0
@@ -312,6 +433,10 @@ $maxVerificationPending = $state -eq 'MAX'
 # response to measured heat. While that default is still in force the release gate uses
 # startupMinMaxSeconds; every MAX entered from a real trigger keeps the full minMaxSeconds floor.
 $startupMaxHold = $simulationStartupMaxHold -and $state -eq 'MAX'
+$curvePercent = 0
+$curveLastChangeSeconds = -1000.0
+$curveTemperatures = [System.Collections.Generic.Queue[double]]::new()
+$curveTemperature = 0.0
 $rpmMismatchSamples = 0
 $temperatureHistory = [System.Collections.Generic.Queue[object]]::new()
 $transitionHistory = [System.Collections.Generic.List[object]]::new()
@@ -401,21 +526,44 @@ try {
                 $rapidRise -or
                 $loadSamples -ge [int]$script:Config.preemptLoadSamples
 
+            # The curve is driven by the hotter of the two silicon sensors, averaged over the last
+            # curveAverageSamples polls. Averaging is what stops a one-sample spike from stepping
+            # the fans up; the system sensor is excluded because it is on a different scale from
+            # the CPU-referenced curve thresholds.
+            $curveSampleTemp = if ($gpuTemp -gt $cpuTemp) { $gpuTemp } else { $cpuTemp }
+            $curveTemperatures.Enqueue([double]$curveSampleTemp)
+            while ($curveTemperatures.Count -gt [int]$script:Config.curveAverageSamples) { [void]$curveTemperatures.Dequeue() }
+            $curveTemperature = [double](($curveTemperatures | Measure-Object -Average).Average)
+
             if ($state -eq 'AUTO') {
                 $coolSamples = 0
                 if ($hot) { $hotSamples++ } else { $hotSamples = 0 }
                 if ($critical -or $hotSamples -ge [int]$script:Config.enterSamples) {
-                    Set-HardwareFanProfile -Profile 'MAX'
-                    $state = 'MAX'
+                    # Critical heat always commands 100 %. Everything else is demand, and demand is
+                    # exactly the band where the fans used to run at 6122 RPM with the machine in
+                    # the forties.
+                    if ($script:CurveEnabled -and -not $critical) {
+                        $curveCommand = Get-CurveCommand -AveragedTemperatureC $curveTemperature -CurrentPercent 0 `
+                            -SecondsSinceLastChange 0 -Configuration $script:Config
+                        Set-HardwareFanProfile -Profile 'CURVE' -Percent $curveCommand.percent
+                        $curvePercent = $curveCommand.percent
+                        $curveLastChangeSeconds = $elapsedSeconds
+                        $state = 'CURVE'
+                    }
+                    else {
+                        Set-HardwareFanProfile -Profile 'MAX'
+                        $curvePercent = 0
+                        $state = 'MAX'
+                    }
                     $maxSince = $now
                     $maxSinceSeconds = $elapsedSeconds
                     $lastMaxWrite = $now
                     $lastMaxWriteSeconds = $elapsedSeconds
-                    $maxVerificationPending = $true
+                    $maxVerificationPending = $state -eq 'MAX'
                     $startupMaxHold = $false
                     $rpmMismatchSamples = 0
                     $reason = if ($critical) { 'critical_temperature' } elseif ($loadSamples -ge [int]$script:Config.preemptLoadSamples) { 'sustained_cpu_load' } elseif ($rapidRise) { 'rapid_temperature_rise' } else { 'sustained_temperature' }
-                    $transition = [ordered]@{ at = $now.ToString('o'); from = 'AUTO'; to = 'MAX'; reason = $reason }
+                    $transition = [ordered]@{ at = $now.ToString('o'); from = 'AUTO'; to = $state; reason = $reason }
                     $transitionHistory.Add($transition)
                     Write-ControllerEvent -Event 'profile_changed' -Data $transition
                     $hotSamples = 0
@@ -456,6 +604,36 @@ try {
                 $hotSamples = 0
                 if ($releaseReset) { $coolSamples = 0 }
                 elseif ($releaseIdleSample) { $coolSamples++ }
+
+                if ($state -eq 'CURVE') {
+                    if ($critical) {
+                        # The proportional band never covers a critical sample.
+                        Set-HardwareFanProfile -Profile 'MAX'
+                        $curvePercent = 0
+                        $state = 'MAX'
+                        $maxVerificationPending = $true
+                        $lastMaxWrite = $now
+                        $lastMaxWriteSeconds = $elapsedSeconds
+                        $rpmMismatchSamples = 0
+                        $transition = [ordered]@{ at = $now.ToString('o'); from = 'CURVE'; to = 'MAX'; reason = 'critical_temperature' }
+                        $transitionHistory.Add($transition)
+                        Write-ControllerEvent -Event 'profile_changed' -Data $transition
+                    }
+                    else {
+                        $curveCommand = Get-CurveCommand -AveragedTemperatureC $curveTemperature -CurrentPercent $curvePercent `
+                            -SecondsSinceLastChange ($elapsedSeconds - $curveLastChangeSeconds) -Configuration $script:Config
+                        if ($curveCommand.changed -and $curveCommand.percent -ne $curvePercent) {
+                            Set-HardwareFanProfile -Profile 'CURVE' -Percent $curveCommand.percent
+                            Write-ControllerEvent -Event 'curve_speed_changed' -Data @{
+                                from = $curvePercent; to = $curveCommand.percent; reason = $curveCommand.reason
+                                temperatureC = [math]::Round($curveTemperature, 1)
+                            }
+                            $curvePercent = $curveCommand.percent
+                            $curveLastChangeSeconds = $elapsedSeconds
+                        }
+                    }
+                }
+
                 $heldSeconds = $elapsedSeconds - $maxSinceSeconds
                 # Only the unproven startup default may leave early, and only after releaseSamples
                 # of verified cool, idle, trend-stable telemetry.
@@ -481,10 +659,12 @@ try {
                         $rpmMismatchSamples = 0
                         throw
                     }
+                    $releasedFrom = $state
                     $state = 'AUTO'
+                    $curvePercent = 0
                     $releaseReason = if ($startupMaxHold) { 'startup_max_released_on_verified_cool' } else { 'sustained_cool_idle' }
                     $startupMaxHold = $false
-                    $transition = [ordered]@{ at = $now.ToString('o'); from = 'MAX'; to = 'AUTO'; reason = $releaseReason }
+                    $transition = [ordered]@{ at = $now.ToString('o'); from = $releasedFrom; to = 'AUTO'; reason = $releaseReason }
                     $transitionHistory.Add($transition)
                     Write-ControllerEvent -Event 'profile_changed' -Data $transition
                     $coolSamples = 0
@@ -492,7 +672,22 @@ try {
                     $lastMaxWriteSeconds = $elapsedSeconds
                     $rpmMismatchSamples = 0
                 }
-                elseif (-not $simulation -and $maxVerificationPending -and $heldSeconds -ge [double]$script:Config.verifyMaxAfterSeconds) {
+                elseif ($state -eq 'CURVE' -and -not $simulation) {
+                    # CURVE is firmware mode 3. Anything else means something overwrote the mode,
+                    # so re-issue the current percentage rather than falling back to 100 %.
+                    $behaviorValue = Get-OptionalSampleValue $sample 'fanBehaviorBitmap'
+                    $curveMode = if ($null -ne $behaviorValue) { ([uint32]$behaviorValue -shr 8) -band 3 } else { $null }
+                    if ($null -ne $curveMode -and $curveMode -ne 3) { $rpmMismatchSamples++ } else { $rpmMismatchSamples = 0 }
+                    if ($rpmMismatchSamples -ge [int]$script:Config.rpmMismatchSamples -and
+                        ($elapsedSeconds - $lastMaxWriteSeconds) -ge [double]$script:Config.rpmReassertMinIntervalSeconds) {
+                        Set-HardwareFanProfile -Profile 'CURVE' -Percent $curvePercent
+                        Write-ControllerEvent -Event 'external_override_corrected' -Data @{ desiredState = 'CURVE'; curvePercent = $curvePercent; fanBehaviorBitmap = $behaviorValue; mismatchSamples = $rpmMismatchSamples }
+                        $lastMaxWrite = $now
+                        $lastMaxWriteSeconds = $elapsedSeconds
+                        $rpmMismatchSamples = 0
+                    }
+                }
+                elseif ($state -eq 'MAX' -and -not $simulation -and $maxVerificationPending -and $heldSeconds -ge [double]$script:Config.verifyMaxAfterSeconds) {
                     if ([int]$sample.cpuFanRpm -lt [int]$script:Config.minimumMaxRpm -or [int]$sample.gpuFanRpm -lt [int]$script:Config.minimumMaxRpm) {
                         Set-HardwareFanProfile -Profile 'MAX'
                         $lastMaxWrite = $now
@@ -504,7 +699,7 @@ try {
                     }
                     $maxVerificationPending = $false
                 }
-                elseif (-not $simulation) {
+                elseif ($state -eq 'MAX' -and -not $simulation) {
                     $behaviorValue = Get-OptionalSampleValue $sample 'fanBehaviorBitmap'
                     $profileMismatch = ($null -ne $behaviorValue -and [uint32]$behaviorValue -ne [uint32]512) -or
                         [int]$sample.cpuFanRpm -lt [int]$script:Config.minimumMaxRpm -or
@@ -539,8 +734,15 @@ try {
                 coolSamples = $coolSamples
                 failureSamples = $failureSamples
                 startupMaxHold = [bool]$startupMaxHold
+                curvePercent = [int]$curvePercent
                 status = if ($simulation) {
                     'SIMULATION'
+                }
+                elseif ($state -eq 'CURVE') {
+                    $mode = if ($null -ne (Get-OptionalSampleValue $sample 'fanBehaviorBitmap')) { ([uint32](Get-OptionalSampleValue $sample 'fanBehaviorBitmap') -shr 8) -band 3 } else { $null }
+                    # The percent-to-RPM relationship has not been measured on this hardware yet,
+                    # so the health gate asserts the mode and a floor, not a predicted RPM.
+                    if ($mode -eq 3 -and [int]$sample.cpuFanRpm -ge [int]$script:Config.curveMinimumVerifiedRpm -and [int]$sample.gpuFanRpm -ge [int]$script:Config.curveMinimumVerifiedRpm) { 'HEALTHY_VERIFIED' } else { 'REASSERT_PENDING' }
                 }
                 elseif ($state -eq 'MAX') {
                     $mode = if ($null -ne (Get-OptionalSampleValue $sample 'fanBehaviorBitmap')) { ([uint32](Get-OptionalSampleValue $sample 'fanBehaviorBitmap') -shr 8) -band 3 } else { $null }
@@ -567,6 +769,7 @@ try {
                     $previousState = $state
                     Set-HardwareFanProfile -Profile 'MAX'
                     $state = 'MAX'
+                    $curvePercent = 0
                     if ($previousState -ne 'MAX') {
                         $maxSince = $now
                         $maxSinceSeconds = $elapsedSeconds

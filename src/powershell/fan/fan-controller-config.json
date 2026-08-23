@@ -27,6 +27,17 @@
   "releaseRiseToleranceC": 2,
   "releaseCpuLoadPct": 20,
   "minimumMaxRpm": 5000,
+  "curveEnabled": false,
+  "curveMinTempC": 45,
+  "curveMaxTempC": 75,
+  "curveMinPct": 30,
+  "curveMaxPct": 100,
+  "curveStartPct": 40,
+  "curveStepPct": 5,
+  "curveAverageSamples": 5,
+  "curveDecreaseHysteresisC": 3,
+  "curveDecreaseHoldSeconds": 30,
+  "curveMinimumVerifiedRpm": 1500,
   "logMaxBytes": 2097152,
   "logKeepFiles": 5
 }

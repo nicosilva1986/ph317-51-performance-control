@@ -28,7 +28,7 @@ function New-Sample {
 }
 
 function Invoke-SimulationCase {
-    param([string] $Name, [string] $InitialState, [object[]] $Samples, [object[]] $AutoWriteReadbacks = @(), [switch] $StartupMaxHold)
+    param([string] $Name, [string] $InitialState, [object[]] $Samples, [object[]] $AutoWriteReadbacks = @(), [switch] $StartupMaxHold, [switch] $CurveEnabled)
     $caseRoot = Join-Path $testRoot $Name
     New-Item -ItemType Directory -Path $caseRoot | Out-Null
     $simulationPath = Join-Path $caseRoot 'simulation.json'
@@ -38,7 +38,14 @@ function Invoke-SimulationCase {
     if ($StartupMaxHold) { $simulation.startupMaxHold = $true }
     if (@($AutoWriteReadbacks).Count -gt 0) { $simulation.autoWriteReadbacks = @($AutoWriteReadbacks) }
     $simulation | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $simulationPath -Encoding utf8
-    $raw = & $engine -NoLogo -NoProfile -NonInteractive -File $controller -ConfigPath $config -SimulationPath $simulationPath -LogPath $logPath -StatusPath $statusPath
+    $caseConfig = $config
+    if ($CurveEnabled) {
+        $caseConfig = Join-Path $caseRoot 'config.json'
+        $configObject = Get-Content -LiteralPath $config -Raw | ConvertFrom-Json
+        $configObject.curveEnabled = $true
+        $configObject | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $caseConfig -Encoding utf8
+    }
+    $raw = & $engine -NoLogo -NoProfile -NonInteractive -File $controller -ConfigPath $caseConfig -SimulationPath $simulationPath -LogPath $logPath -StatusPath $statusPath
     if ($LASTEXITCODE -ne 0) { throw "Simulation $Name exited $LASTEXITCODE." }
     return [pscustomobject]@{
         result = ($raw | ConvertFrom-Json)
@@ -123,6 +130,165 @@ try {
         throw 'A load-triggered MAX did not release after its full residence and cool interval.'
     }
     $caseResults.Add([ordered]@{ name = 'triggered-max-releases-after-full-residence'; status = 'PASS' })
+
+    # --- proportional curve -----------------------------------------------------------
+    # The policy is off by default, so the whole suite above proves the AUTO/MAX behaviour is
+    # unchanged. These cases drive it explicitly.
+    $tokens = $null
+    $parseErrors = $null
+    $controllerAst = [Management.Automation.Language.Parser]::ParseFile($controller, [ref]$tokens, [ref]$parseErrors)
+    if (@($parseErrors).Count -ne 0) { throw "Controller parser errors: $($parseErrors -join '; ')" }
+    foreach ($name in @('Get-CurveTargetPercent', 'Get-CurveReleaseTemperature', 'Get-CurveCommand')) {
+        $fn = $controllerAst.Find({
+            param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name
+        }.GetNewClosure(), $true)
+        if ($null -eq $fn) { throw "The production curve function is missing: $name" }
+        Invoke-Expression $fn.Extent.Text
+    }
+
+    $curveConfig = Get-Content -LiteralPath $config -Raw | ConvertFrom-Json
+
+    # Linear interpolation, clamped at both ends, quantised upward so a step never commands less
+    # cooling than the curve asks for.
+    $expectations = @(
+        @{ temp = 30.0; percent = 30 },
+        @{ temp = 45.0; percent = 30 },
+        @{ temp = 50.0; percent = 45 },
+        @{ temp = 60.0; percent = 65 },
+        @{ temp = 75.0; percent = 100 },
+        @{ temp = 95.0; percent = 100 }
+    )
+    foreach ($expectation in $expectations) {
+        $actual = Get-CurveTargetPercent -TemperatureC ([double]$expectation.temp) -Configuration $curveConfig
+        if ($actual -ne [int]$expectation.percent) {
+            throw "Curve at $($expectation.temp) C returned $actual %, expected $($expectation.percent) %."
+        }
+    }
+    $caseResults.Add([ordered]@{ name = 'curve-interpolates-and-clamps'; status = 'PASS' })
+
+    $previous = 0
+    for ($t = 30.0; $t -le 95.0; $t += 0.5) {
+        $current = Get-CurveTargetPercent -TemperatureC $t -Configuration $curveConfig
+        if ($current -lt $previous) { throw "Curve is not monotonic: $t C dropped to $current %." }
+        if ($current -lt [int]$curveConfig.curveMinPct -or $current -gt [int]$curveConfig.curveMaxPct) {
+            throw "Curve at $t C returned $current %, outside the configured bounds."
+        }
+        $previous = $current
+    }
+    $caseResults.Add([ordered]@{ name = 'curve-is-monotonic-and-bounded'; status = 'PASS' })
+
+    # MINSTART: the first command has to spin the fans up even where the curve asks for less.
+    $command = Get-CurveCommand -AveragedTemperatureC 46.0 -CurrentPercent 0 -SecondsSinceLastChange 0 -Configuration $curveConfig
+    if ($command.percent -ne [int]$curveConfig.curveStartPct -or -not $command.changed -or $command.reason -ne 'curve_start') {
+        throw "Curve start ignored curveStartPct: got $($command.percent) % ($($command.reason))."
+    }
+    $caseResults.Add([ordered]@{ name = 'curve-start-honours-minstart'; status = 'PASS' })
+
+    # More cooling is never delayed.
+    $command = Get-CurveCommand -AveragedTemperatureC 70.0 -CurrentPercent 40 -SecondsSinceLastChange 0 -Configuration $curveConfig
+    if ($command.percent -ne 90 -or -not $command.changed -or $command.reason -ne 'curve_increase') {
+        throw "Curve increase was delayed or wrong: got $($command.percent) % ($($command.reason))."
+    }
+    $caseResults.Add([ordered]@{ name = 'curve-increase-is-immediate'; status = 'PASS' })
+
+    # Reductions wait for the dwell, then for the falling hysteresis. Both gates exist so an
+    # intermittent workload cannot make the fans audibly pump.
+    $command = Get-CurveCommand -AveragedTemperatureC 46.0 -CurrentPercent 90 -SecondsSinceLastChange 10 -Configuration $curveConfig
+    if ($command.changed -or $command.percent -ne 90 -or $command.reason -ne 'curve_decrease_hold') {
+        throw "Curve decreased before curveDecreaseHoldSeconds: $($command.reason)."
+    }
+    $caseResults.Add([ordered]@{ name = 'curve-decrease-waits-for-dwell'; status = 'PASS' })
+
+    $releaseTemperature = Get-CurveReleaseTemperature -Percent 90 -Configuration $curveConfig
+    $justInside = $releaseTemperature - 1.0
+    $command = Get-CurveCommand -AveragedTemperatureC $justInside -CurrentPercent 90 -SecondsSinceLastChange 600 -Configuration $curveConfig
+    if ($command.changed -or $command.reason -ne 'curve_decrease_hysteresis') {
+        throw "Curve decreased inside the hysteresis band: $($command.reason)."
+    }
+    $caseResults.Add([ordered]@{ name = 'curve-decrease-respects-hysteresis'; status = 'PASS' })
+
+    $command = Get-CurveCommand -AveragedTemperatureC 60.0 -CurrentPercent 90 -SecondsSinceLastChange 600 -Configuration $curveConfig
+    if (-not $command.changed -or $command.percent -ne 65 -or $command.reason -ne 'curve_decrease') {
+        throw "Curve never stepped down: got $($command.percent) % ($($command.reason))."
+    }
+    $caseResults.Add([ordered]@{ name = 'curve-decrease-eventually-steps-down'; status = 'PASS' })
+
+    $command = Get-CurveCommand -AveragedTemperatureC 60.0 -CurrentPercent 65 -SecondsSinceLastChange 600 -Configuration $curveConfig
+    if ($command.changed -or $command.reason -ne 'curve_steady') {
+        throw "Curve rewrote an unchanged percentage: $($command.reason)."
+    }
+    $caseResults.Add([ordered]@{ name = 'curve-steady-writes-nothing'; status = 'PASS' })
+
+    # End to end: demand at 50 C must reach the proportional band, not 6122 RPM.
+    $samples = [System.Collections.Generic.List[object]]::new()
+    1..3 | ForEach-Object { $samples.Add((New-Sample 50 0 45 80)) }
+    $case = Invoke-SimulationCase -Name 'curve-demand-is-proportional' -InitialState AUTO -Samples $samples -CurveEnabled
+    if (@($case.result.transitions).Count -ne 1 -or $case.result.transitions[0].to -ne 'CURVE' -or
+        $case.result.transitions[0].reason -ne 'sustained_cpu_load' -or $case.status.state -ne 'CURVE' -or
+        [int]$case.status.curvePercent -ne 45) {
+        throw "Demand at 50 C did not enter the proportional band at 45 %: state=$($case.status.state) percent=$($case.status.curvePercent)."
+    }
+    $caseResults.Add([ordered]@{ name = 'curve-demand-is-proportional'; status = 'PASS' })
+
+    # The same demand with the curve off must still go to MAX, unchanged.
+    $case = Invoke-SimulationCase -Name 'curve-disabled-still-uses-max' -InitialState AUTO -Samples $samples
+    if (@($case.result.transitions).Count -ne 1 -or $case.result.transitions[0].to -ne 'MAX' -or
+        $case.status.state -ne 'MAX' -or [int]$case.status.curvePercent -ne 0) {
+        throw 'With curveEnabled false the controller no longer behaves as the MAX-only policy.'
+    }
+    $caseResults.Add([ordered]@{ name = 'curve-disabled-still-uses-max'; status = 'PASS' })
+
+    # Critical heat is never proportional.
+    $samples = [System.Collections.Generic.List[object]]::new()
+    1..3 | ForEach-Object { $samples.Add((New-Sample 50 0 45 80)) }
+    1..2 | ForEach-Object { $samples.Add((New-Sample 80 0 50 80)) }
+    $case = Invoke-SimulationCase -Name 'curve-escalates-on-critical' -InitialState AUTO -Samples $samples -CurveEnabled
+    $transitions = @($case.result.transitions)
+    if ($transitions.Count -ne 2 -or $transitions[0].to -ne 'CURVE' -or
+        $transitions[1].from -ne 'CURVE' -or $transitions[1].to -ne 'MAX' -or
+        $transitions[1].reason -ne 'critical_temperature' -or
+        $case.status.state -ne 'MAX' -or [int]$case.status.curvePercent -ne 0) {
+        throw 'A critical sample did not escalate the proportional band to MAX.'
+    }
+    $caseResults.Add([ordered]@{ name = 'curve-escalates-on-critical'; status = 'PASS' })
+
+    # Rising demand raises the percentage without waiting.
+    $samples = [System.Collections.Generic.List[object]]::new()
+    1..3 | ForEach-Object { $samples.Add((New-Sample 50 0 45 80)) }
+    1..12 | ForEach-Object { $samples.Add((New-Sample 65 0 50 80)) }
+    $case = Invoke-SimulationCase -Name 'curve-follows-rising-demand' -InitialState AUTO -Samples $samples -CurveEnabled
+    if ($case.status.state -ne 'CURVE' -or [int]$case.status.curvePercent -ne 80) {
+        throw "Rising demand did not raise the curve to 80 %: percent=$($case.status.curvePercent)."
+    }
+    if (-not (@($case.events | Where-Object { $_.event -eq 'curve_speed_changed' -and $_.reason -eq 'curve_increase' }).Count -ge 1)) {
+        throw 'No curve_increase was recorded while demand was rising.'
+    }
+    $caseResults.Add([ordered]@{ name = 'curve-follows-rising-demand'; status = 'PASS' })
+
+    # Falling demand holds the previous percentage for the dwell instead of pumping.
+    $samples = [System.Collections.Generic.List[object]]::new()
+    1..3 | ForEach-Object { $samples.Add((New-Sample 65 0 50 80)) }
+    1..10 | ForEach-Object { $samples.Add((New-Sample 46 0 44 80)) }
+    $case = Invoke-SimulationCase -Name 'curve-holds-through-brief-drop' -InitialState AUTO -Samples $samples -CurveEnabled
+    $entryPercent = 80
+    if ($case.status.state -ne 'CURVE' -or [int]$case.status.curvePercent -ne $entryPercent) {
+        throw "A brief drop reduced the curve inside the dwell: percent=$($case.status.curvePercent)."
+    }
+    $caseResults.Add([ordered]@{ name = 'curve-holds-through-brief-drop'; status = 'PASS' })
+
+    # Sustained cool demand eventually steps the curve down.
+    $samples = [System.Collections.Generic.List[object]]::new()
+    1..3 | ForEach-Object { $samples.Add((New-Sample 65 0 50 80)) }
+    1..40 | ForEach-Object { $samples.Add((New-Sample 46 0 44 80)) }
+    $case = Invoke-SimulationCase -Name 'curve-steps-down-when-sustained' -InitialState AUTO -Samples $samples -CurveEnabled
+    if ($case.status.state -ne 'CURVE' -or [int]$case.status.curvePercent -ge $entryPercent) {
+        throw "Sustained cool demand never reduced the curve: percent=$($case.status.curvePercent)."
+    }
+    if (-not (@($case.events | Where-Object { $_.event -eq 'curve_speed_changed' -and $_.reason -eq 'curve_decrease' }).Count -ge 1)) {
+        throw 'No curve_decrease was recorded while demand was sustained and cool.'
+    }
+    $caseResults.Add([ordered]@{ name = 'curve-steps-down-when-sustained'; status = 'PASS' })
 
     $samples = [System.Collections.Generic.List[object]]::new()
     1..3 | ForEach-Object { $samples.Add((New-Sample 50 0 45 5)) }
