@@ -14,14 +14,14 @@
 Current performance-first candidate:
 
 - poll every 2 seconds;
-- enter after 2 consecutive samples when any condition is true:
-  - CPU ≥60 °C;
-  - GPU ≥55 °C;
-  - system ≥55 °C;
-  - total CPU ≥30 %;
-  - any logical CPU ≥70 %;
-  - rise ≥4 °C in 6 seconds after reaching 55 °C;
-- immediate `MAX` at CPU/GPU ≥75 °C or system ≥70 °C;
+- enter after 3 consecutive samples when any condition is true:
+  - CPU ≥72 °C;
+  - GPU ≥72 °C;
+  - system ≥65 °C;
+  - total CPU ≥60 % for 10 consecutive samples (20 seconds);
+  - any logical CPU ≥95 % for 10 consecutive samples;
+  - rise ≥4 °C in 6 seconds after reaching 62 °C;
+- immediate `MAX` at CPU/GPU ≥85 °C or system ≥75 °C;
 - optional proportional band (`curveEnabled`, ships **false**): when demand is not critical the
   controller drives firmware CUSTOM mode at an interpolated percentage instead of 100 %. Linear
   between `curveMinTempC`/`curveMinPct` and `curveMaxTempC`/`curveMaxPct`, driven by the hotter of
@@ -32,9 +32,19 @@ Current performance-first candidate:
   command. Critical temperature, sensor failure, readback failure and every watchdog recovery path
   keep commanding 100 %, so the fail-closed guarantee is unchanged;
 - fail-safe `MAX` after 3 invalid samples;
-- minimum `MAX` residence: 5 minutes for every `MAX` entered from a trigger;
+- minimum `MAX` residence: 2 minutes for every `MAX` entered from a trigger;
 - the `MAX` adopted at process start, before the controller has read a single sample, is an unproven fail-safe default rather than a response to measured heat. It uses the separate `startupMinMaxSeconds` floor (60 s) and still requires the full 2 minutes of qualifying idle samples, so it releases on verified cool telemetry instead of holding the fans at 6122 RPM for 5 minutes after every restart. Any trigger firing during that window promotes the hold to the full 5-minute residence;
-- return to `AUTO` only after the 5-minute minimum `MAX` residence and 2 minutes of qualifying idle samples inside the CPU 55 °C, GPU 50 °C (or absent), system 50 °C and total CPU 20 % release envelope, with a stable trend at the transition instant; a transient non-idle sample pauses accumulation, while sustained demand, rapid thermal rise, or leaving the thermal envelope resets it;
+- return to `AUTO` only after the 2-minute minimum `MAX` residence and 60 seconds of qualifying idle samples inside the CPU 65 °C, GPU 65 °C (or absent), system 58 °C and total CPU 40 % release envelope, with a stable trend at the transition instant; a transient non-idle sample pauses accumulation, while sustained demand, rapid thermal rise, or leaving the thermal envelope resets it;
+
+These thresholds were recalibrated on 2026-08-23. The previous set treated 60 °C as demand and a
+single logical core at 70 % for 4 seconds as sustained load, which put the machine at 6122 RPM for
+59.6 % of a measured 35.5-hour window with a median CPU temperature of 42 °C. The release envelope
+was also unreachable in practice: any sample above 55 °C reset the whole 2-minute countdown, and a
+normally loaded machine crosses 55 °C every minute or two. `preemptTemperatureC` is deliberately
+kept below `releaseCpuC` so a rapid rise inside the release envelope stays detectable; if it were
+above, the envelope check would always have fired first and the rise trigger would be dead code.
+The controller-side test suite asserts the ordering of these thresholds and refuses a calibration
+that returns to running the fans flat out on a warm idle.
 - verify every `AUTO` write with a bounded post-write firmware readback before publishing the new state; stale or invalid readback requests `MAX` and reports a degraded fail-safe state;
 - reassert after two consecutive mode/RPM mismatches.
 - on `MAX + REASSERT_PENDING`, the controller remains the only privileged writer during the protected `verifyMaxAfterSeconds` interval; if the condition persists for at least two observations, the watchdog stops the controller, acquires its named write lease, requests `MAX`, releases the lease and only then restarts the controller. `AUTO + REASSERT_PENDING` is fatal and uses that same quiesced recovery path, while stale, malformed and integrity failures retain immediate fail-safe handling.
