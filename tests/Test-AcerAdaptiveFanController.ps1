@@ -28,13 +28,14 @@ function New-Sample {
 }
 
 function Invoke-SimulationCase {
-    param([string] $Name, [string] $InitialState, [object[]] $Samples, [object[]] $AutoWriteReadbacks = @())
+    param([string] $Name, [string] $InitialState, [object[]] $Samples, [object[]] $AutoWriteReadbacks = @(), [switch] $StartupMaxHold)
     $caseRoot = Join-Path $testRoot $Name
     New-Item -ItemType Directory -Path $caseRoot | Out-Null
     $simulationPath = Join-Path $caseRoot 'simulation.json'
     $logPath = Join-Path $caseRoot 'events.jsonl'
     $statusPath = Join-Path $caseRoot 'status.json'
     $simulation = [ordered]@{ initialState = $InitialState; samples = $Samples }
+    if ($StartupMaxHold) { $simulation.startupMaxHold = $true }
     if (@($AutoWriteReadbacks).Count -gt 0) { $simulation.autoWriteReadbacks = @($AutoWriteReadbacks) }
     $simulation | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $simulationPath -Encoding utf8
     $raw = & $engine -NoLogo -NoProfile -NonInteractive -File $controller -ConfigPath $config -SimulationPath $simulationPath -LogPath $logPath -StatusPath $statusPath
@@ -51,8 +52,11 @@ try {
     $policy = Get-Content -LiteralPath $config -Raw | ConvertFrom-Json
     if ([int]$policy.pollSeconds -ne 2 -or [int]$policy.releaseSamples -ne 60 -or
         [int]$policy.minMaxSeconds -ne 300 -or [int]$policy.preemptCpuMaxLogicalLoadPct -ne 70 -or
-        [int]$policy.preemptLoadSamples -ne 2) {
+        [int]$policy.preemptLoadSamples -ne 2 -or [int]$policy.startupMinMaxSeconds -ne 60) {
         throw 'Fan release policy contract drifted from the validated 2-minute idle / 5-minute MAX calibration.'
+    }
+    if ([int]$policy.startupMinMaxSeconds -gt [int]$policy.minMaxSeconds) {
+        throw 'startupMinMaxSeconds must never exceed the triggered-MAX residence floor.'
     }
     $caseResults.Add([ordered]@{ name = 'release-policy-contract'; status = 'PASS' })
 
@@ -63,6 +67,62 @@ try {
         throw 'The 5-minute minimum MAX residence was weakened by the shorter idle-sample gate.'
     }
     $caseResults.Add([ordered]@{ name = 'minimum-max-residence'; status = 'PASS' })
+
+    # The MAX adopted before the controller has read a single sample is an unproven fail-safe
+    # default, so it is released under startupMinMaxSeconds. It still requires the full
+    # releaseSamples of cool, idle, trend-stable evidence: 40 cool samples must not be enough.
+    $samples = [System.Collections.Generic.List[object]]::new()
+    1..40 | ForEach-Object { $samples.Add((New-Sample 48 0 45 8)) }
+    $case = Invoke-SimulationCase -Name 'startup-max-holds-without-cool-evidence' -InitialState MAX -Samples $samples -StartupMaxHold
+    if (@($case.result.transitions).Count -ne 0 -or $case.status.state -ne 'MAX' -or [int]$case.status.coolSamples -ne 40) {
+        throw 'The startup fail-safe MAX released before releaseSamples of verified cool telemetry.'
+    }
+    $caseResults.Add([ordered]@{ name = 'startup-max-holds-without-cool-evidence'; status = 'PASS' })
+
+    $samples = [System.Collections.Generic.List[object]]::new()
+    1..60 | ForEach-Object { $samples.Add((New-Sample 48 0 45 8)) }
+    $case = Invoke-SimulationCase -Name 'startup-max-releases-on-verified-cool' -InitialState MAX -Samples $samples -StartupMaxHold
+    if (@($case.result.transitions).Count -ne 1 -or
+        $case.result.transitions[0].reason -ne 'startup_max_released_on_verified_cool' -or
+        $case.status.state -ne 'AUTO' -or [bool]$case.status.startupMaxHold) {
+        throw 'The startup fail-safe MAX did not release once telemetry proved the machine cool.'
+    }
+    $caseResults.Add([ordered]@{ name = 'startup-max-releases-on-verified-cool'; status = 'PASS' })
+
+    # A trigger fired while the startup hold is still in force must promote the hold to the full
+    # residence: from that point on there is measured heat, not just an unproven default.
+    $samples = [System.Collections.Generic.List[object]]::new()
+    1..3 | ForEach-Object { $samples.Add((New-Sample 62 0 46 8)) }
+    1..100 | ForEach-Object { $samples.Add((New-Sample 48 0 45 8)) }
+    $case = Invoke-SimulationCase -Name 'startup-hold-promoted-by-real-trigger' -InitialState AUTO -Samples $samples -StartupMaxHold
+    if (@($case.result.transitions).Count -ne 1 -or $case.result.transitions[0].to -ne 'MAX' -or
+        $case.status.state -ne 'MAX' -or [int]$case.status.coolSamples -lt 60 -or [bool]$case.status.startupMaxHold) {
+        throw 'A MAX entered from measured heat released under the startup floor.'
+    }
+    $caseResults.Add([ordered]@{ name = 'startup-hold-promoted-by-real-trigger'; status = 'PASS' })
+
+    # A MAX entered from a real trigger keeps the full 5-minute residence, even with far more cool
+    # evidence than the release gate asks for. This is the guarantee startupMinMaxSeconds must not
+    # be able to reach.
+    $samples = [System.Collections.Generic.List[object]]::new()
+    1..3 | ForEach-Object { $samples.Add((New-Sample 52 0 46 80)) }
+    1..100 | ForEach-Object { $samples.Add((New-Sample 48 0 45 8)) }
+    $case = Invoke-SimulationCase -Name 'triggered-max-keeps-minimum-residence' -InitialState AUTO -Samples $samples
+    if (@($case.result.transitions).Count -ne 1 -or $case.result.transitions[0].reason -ne 'sustained_cpu_load' -or
+        $case.status.state -ne 'MAX' -or [int]$case.status.coolSamples -lt 60 -or [bool]$case.status.startupMaxHold) {
+        throw 'A load-triggered MAX released before the 5-minute minimum residence elapsed.'
+    }
+    $caseResults.Add([ordered]@{ name = 'triggered-max-keeps-minimum-residence'; status = 'PASS' })
+
+    $samples = [System.Collections.Generic.List[object]]::new()
+    1..3 | ForEach-Object { $samples.Add((New-Sample 52 0 46 80)) }
+    1..160 | ForEach-Object { $samples.Add((New-Sample 48 0 45 8)) }
+    $case = Invoke-SimulationCase -Name 'triggered-max-releases-after-full-residence' -InitialState AUTO -Samples $samples
+    if (@($case.result.transitions).Count -ne 2 -or $case.result.transitions[1].reason -ne 'sustained_cool_idle' -or
+        $case.status.state -ne 'AUTO') {
+        throw 'A load-triggered MAX did not release after its full residence and cool interval.'
+    }
+    $caseResults.Add([ordered]@{ name = 'triggered-max-releases-after-full-residence'; status = 'PASS' })
 
     $samples = [System.Collections.Generic.List[object]]::new()
     1..3 | ForEach-Object { $samples.Add((New-Sample 50 0 45 5)) }

@@ -6,11 +6,23 @@ param(
     [int] $HeartbeatMaximumAgeSeconds = 15,
     [ValidateRange(0, 60)]
     [int] $MaximumFutureSkewSeconds = 5,
+    [ValidateRange(1, 20)]
+    [int] $StatusReadAttempts = 5,
+    [ValidateRange(1, 10)]
+    [int] $TransientHeartbeatTolerance = 2,
+    [ValidateRange(5, 300)]
+    [int] $PrimaryStartTimeoutSeconds = 30,
+    [ValidateRange(1, 20)]
+    [int] $PrimaryStartRunningObservations = 3,
+    [ValidateRange(1, 20)]
+    [int] $RecoveryReregisterThreshold = 3,
     [switch] $ProbeOnly,
     [ValidateRange(0, 1000)]
     [int] $ProbePreviousPendingCount = 0,
     [ValidateRange(0, 3600)]
-    [double] $ProbePendingElapsedSeconds = 0
+    [double] $ProbePendingElapsedSeconds = 0,
+    [ValidateRange(0, 1000)]
+    [int] $ProbePreviousTransientCount = 0
 )
 
 Set-StrictMode -Version Latest
@@ -23,6 +35,7 @@ $controllerPath = Join-Path $Root 'AcerAdaptiveFanController.ps1'
 $configPath = Join-Path $Root 'fan-controller-config.json'
 $watchdogPath = Join-Path $Root 'AcerFanWatchdog.ps1'
 $watchdogPollSeconds = 10
+$script:ConsecutiveRecoveryFailures = 0
 
 function Write-WatchdogEvent {
     param([string] $Event, [string] $Detail = '')
@@ -101,6 +114,60 @@ function Get-IntegrityState {
     return [pscustomobject]$result
 }
 
+function Read-PrimaryStatusDocument {
+    param([ValidateRange(1, 20)] [int] $Attempts = 5)
+
+    # The primary republishes this file every poll. Sharing Delete and Write means this read never
+    # blocks the writer's atomic swap, and a read that still loses the race is reported as a
+    # transient failure rather than as evidence that the controller is dead.
+    $lastDetail = 'Primary heartbeat is missing.'
+    for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+        try {
+            $stream = [IO.File]::Open($statusPath, [IO.FileMode]::Open, [IO.FileAccess]::Read,
+                ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+            try {
+                $reader = [IO.StreamReader]::new($stream, [Text.UTF8Encoding]::new($false), $true)
+                $raw = $reader.ReadToEnd()
+            }
+            finally {
+                $stream.Dispose()
+            }
+            if ([string]::IsNullOrWhiteSpace($raw)) {
+                $lastDetail = 'Primary heartbeat is empty.'
+            }
+            else {
+                $document = $raw | ConvertFrom-Json
+                if ($null -eq $document) {
+                    $lastDetail = 'Primary heartbeat did not parse into an object.'
+                }
+                else {
+                    return [pscustomobject]@{ ok = $true; status = $document; detail = 'OK' }
+                }
+            }
+        }
+        catch {
+            $lastDetail = $_.Exception.Message
+        }
+        if ($attempt -lt $Attempts) { Start-Sleep -Milliseconds 120 }
+    }
+    return [pscustomobject]@{ ok = $false; status = $null; detail = $lastDetail }
+}
+
+function Test-PrimaryHeartbeatNewerThan {
+    param([Parameter(Mandatory)] [datetimeoffset] $Mark)
+
+    $document = Read-PrimaryStatusDocument -Attempts 1
+    if (-not $document.ok) { return $false }
+    $property = $document.status.PSObject.Properties['updatedAt']
+    if ($null -eq $property) { return $false }
+    $updated = [datetimeoffset]::MinValue
+    if (-not [datetimeoffset]::TryParse([string]$property.Value, [Globalization.CultureInfo]::InvariantCulture,
+            [Globalization.DateTimeStyles]::RoundtripKind, [ref]$updated)) {
+        return $false
+    }
+    return $updated -gt $Mark
+}
+
 function Get-RequiredUnsignedInteger {
     param(
         [Parameter(Mandatory)] $InputObject,
@@ -137,8 +204,16 @@ function Get-PrimaryStatusHealth {
 
     $result = [ordered]@{ valid = $false; disposition = 'FATAL'; detail = ''; status = $null; ageSeconds = $null }
     try {
-        if (-not (Test-Path -LiteralPath $statusPath -PathType Leaf)) { throw 'Primary heartbeat is missing.' }
-        $status = Get-Content -LiteralPath $statusPath -Raw | ConvertFrom-Json
+        $document = Read-PrimaryStatusDocument -Attempts $StatusReadAttempts
+        if (-not $document.ok) {
+            # A read that never landed is not evidence the controller stopped. Classify it as
+            # transient so one lost race cannot tear down a healthy primary; a controller that is
+            # genuinely dead still trips the staleness check below within HeartbeatMaximumAgeSeconds.
+            $result.disposition = 'TRANSIENT'
+            $result.detail = $document.detail
+            return [pscustomobject]$result
+        }
+        $status = $document.status
         foreach ($name in @('updatedAt', 'state', 'status', 'fanBehaviorBitmap')) {
             if ($null -eq $status.PSObject.Properties[$name]) { throw "Primary heartbeat property is missing: $name" }
         }
@@ -194,21 +269,33 @@ function Get-PrimaryStatusHealth {
 function Get-HeartbeatRecoveryDecision {
     param(
         [Parameter(Mandatory)]
-        [ValidateSet('HEALTHY_VERIFIED', 'REASSERT_PENDING', 'FATAL')]
+        [ValidateSet('HEALTHY_VERIFIED', 'REASSERT_PENDING', 'TRANSIENT', 'FATAL')]
         [string] $Disposition,
         [ValidateRange(0, 1000)]
         [int] $PreviousPendingCount,
         [ValidateRange(0, 3600)]
         [double] $PendingElapsedSeconds,
         [ValidateRange(1, 300)]
-        [int] $VerifyMaxAfterSeconds
+        [int] $VerifyMaxAfterSeconds,
+        [ValidateRange(0, 1000)]
+        [int] $PreviousTransientCount = 0,
+        [ValidateRange(1, 10)]
+        [int] $TransientTolerance = 2
     )
 
     if ($Disposition -eq 'HEALTHY_VERIFIED') {
-        return [pscustomobject]@{ action = 'NONE'; nextPendingCount = 0; resetWindow = $true }
+        return [pscustomobject]@{ action = 'NONE'; nextPendingCount = 0; nextTransientCount = 0; resetWindow = $true }
+    }
+    if ($Disposition -eq 'TRANSIENT') {
+        # Losing a read race against the primary's own republish is common and self-correcting.
+        # Recover only once the primary has failed to publish a readable heartbeat across
+        # TransientTolerance consecutive polls.
+        $nextTransient = $PreviousTransientCount + 1
+        $transientAction = if ($nextTransient -ge $TransientTolerance) { 'QUIESCE_MAX_RESTART' } else { 'WAIT_PRIMARY' }
+        return [pscustomobject]@{ action = $transientAction; nextPendingCount = 0; nextTransientCount = $nextTransient; resetWindow = $true }
     }
     if ($Disposition -eq 'FATAL') {
-        return [pscustomobject]@{ action = 'QUIESCE_MAX_RESTART'; nextPendingCount = 0; resetWindow = $true }
+        return [pscustomobject]@{ action = 'QUIESCE_MAX_RESTART'; nextPendingCount = 0; nextTransientCount = 0; resetWindow = $true }
     }
 
     $nextCount = $PreviousPendingCount + 1
@@ -218,7 +305,7 @@ function Get-HeartbeatRecoveryDecision {
     else {
         'WAIT_PRIMARY'
     }
-    return [pscustomobject]@{ action = $action; nextPendingCount = $nextCount; resetWindow = $false }
+    return [pscustomobject]@{ action = $action; nextPendingCount = $nextCount; nextTransientCount = 0; resetWindow = $false }
 }
 
 function Test-PrimaryTaskDefinition {
@@ -253,7 +340,19 @@ function Register-TrustedPrimaryTask {
 function Stop-PrimaryAndAcquireControllerLease {
     $task = $null
     try { $task = Get-ScheduledTask -TaskName $PrimaryTaskName -ErrorAction SilentlyContinue } catch { }
-    if ($task -and $task.State -eq 'Running') { Stop-ScheduledTask -TaskName $PrimaryTaskName }
+    if ($task -and $task.State -eq 'Running') {
+        Stop-ScheduledTask -TaskName $PrimaryTaskName
+        # The task is registered MultipleInstances=IgnoreNew, so a Start issued while the previous
+        # instance is still terminating is silently discarded. Wait for the engine to report the
+        # stop before anyone tries to start it again.
+        $stopClock = [Diagnostics.Stopwatch]::StartNew()
+        while ($stopClock.Elapsed.TotalSeconds -lt 10) {
+            Start-Sleep -Milliseconds 200
+            $current = $null
+            try { $current = Get-ScheduledTask -TaskName $PrimaryTaskName -ErrorAction SilentlyContinue } catch { }
+            if (-not $current -or $current.State -ne 'Running') { break }
+        }
+    }
 
     $lease = [Threading.Mutex]::new($false, 'Global\AcerAdaptiveFanController')
     try {
@@ -283,22 +382,30 @@ function Start-TrustedPrimaryTask {
     if (-not $task -or -not (Test-PrimaryTaskDefinition -Task $task)) {
         Register-TrustedPrimaryTask
     }
+    # Anything published after this mark was written by the instance being started, so a newer
+    # heartbeat is unambiguous proof of life rather than a leftover from the previous instance.
+    $restartMark = [datetimeoffset]::Now
     Start-ScheduledTask -TaskName $PrimaryTaskName
 
     $startClock = [Diagnostics.Stopwatch]::StartNew()
     $runningObservations = 0
     do {
-        Start-Sleep -Milliseconds 100
+        Start-Sleep -Milliseconds 250
         $task = Get-ScheduledTask -TaskName $PrimaryTaskName -ErrorAction SilentlyContinue
         if ($task -and $task.State -eq 'Running') {
             $runningObservations++
-            if ($runningObservations -ge 5) { return }
+            if ($runningObservations -ge $PrimaryStartRunningObservations) { return }
         }
         else {
             $runningObservations = 0
         }
-    } while ($startClock.Elapsed.TotalSeconds -lt 5)
-    throw 'Primary task did not reach Running state after restart.'
+
+        # The task engine can report a transient non-Running state during hand-off. Declaring
+        # failure while the controller is in fact alive is what left the fans pinned at MAX and
+        # sent the watchdog back around to stop it again on the next poll.
+        if (Test-PrimaryHeartbeatNewerThan -Mark $restartMark) { return }
+    } while ($startClock.Elapsed.TotalSeconds -lt $PrimaryStartTimeoutSeconds)
+    throw "Primary task did not reach Running state within $PrimaryStartTimeoutSeconds seconds after restart."
 }
 
 function Invoke-WatchdogRecoveryAction {
@@ -352,10 +459,22 @@ function Invoke-EmergencyRecovery {
         -StopPrimary { Stop-PrimaryAndAcquireControllerLease } -RequestMax { Set-EmergencyMax } `
         -ReleasePrimary { param($lease) Release-ControllerLease -Lease $lease } -StartPrimary { Start-TrustedPrimaryTask }
     if ($result.outcome -eq 'PRIMARY_RESTARTED') {
+        $script:ConsecutiveRecoveryFailures = 0
         Write-WatchdogEvent 'primary_restarted' $Reason
     }
     else {
+        $script:ConsecutiveRecoveryFailures++
         Write-WatchdogEvent 'primary_recovery_error' $result.detail
+        if ($script:ConsecutiveRecoveryFailures -ge $RecoveryReregisterThreshold) {
+            # Repeated failures mean the registered task itself can no longer start the controller.
+            # Every one of these attempts leaves the fans at MAX with no primary, so rebuild the
+            # task from the trusted definition instead of repeating the same failing restart.
+            $reregisterDetail = 'OK'
+            try { Register-TrustedPrimaryTask }
+            catch { $reregisterDetail = $_.Exception.Message }
+            Write-WatchdogEvent 'primary_task_reregistered' "consecutiveFailures=$($script:ConsecutiveRecoveryFailures); detail=$reregisterDetail"
+            $script:ConsecutiveRecoveryFailures = 0
+        }
     }
     return $result
 }
@@ -371,10 +490,11 @@ if ($ProbeOnly) {
     $verifySeconds = if ($integrityState.valid) { [int]$integrityState.config.verifyMaxAfterSeconds } else { 1 }
     $decision = if ($integrityState.valid) {
         Get-HeartbeatRecoveryDecision -Disposition $health.disposition -PreviousPendingCount $ProbePreviousPendingCount `
-            -PendingElapsedSeconds $ProbePendingElapsedSeconds -VerifyMaxAfterSeconds $verifySeconds
+            -PendingElapsedSeconds $ProbePendingElapsedSeconds -VerifyMaxAfterSeconds $verifySeconds `
+            -PreviousTransientCount $ProbePreviousTransientCount -TransientTolerance $TransientHeartbeatTolerance
     }
     else {
-        [pscustomobject]@{ action = 'QUIESCE_MAX'; nextPendingCount = 0; resetWindow = $true }
+        [pscustomobject]@{ action = 'QUIESCE_MAX'; nextPendingCount = 0; nextTransientCount = 0; resetWindow = $true }
     }
     [ordered]@{ integrity = $integrityState; health = $health; decision = $decision; verifyMaxAfterSeconds = $verifySeconds } | ConvertTo-Json -Depth 8
     if ($integrityState.valid -and $health.valid) { exit 0 }
@@ -388,12 +508,14 @@ if (-not $createdNew) { exit 0 }
 try {
     Write-WatchdogEvent 'watchdog_started'
     $pendingCount = 0
+    $transientCount = 0
     $pendingClock = [Diagnostics.Stopwatch]::new()
     while ($true) {
         try {
             $integrityState = Get-IntegrityState
             if (-not $integrityState.valid) {
                 $pendingCount = 0
+                $transientCount = 0
                 $pendingClock.Reset()
                 $integrityDispatch = Invoke-WatchdogRecoveryAction -Action 'QUIESCE_MAX' -Reason $integrityState.detail `
                     -StopPrimary { Stop-PrimaryAndAcquireControllerLease } -RequestMax { Set-EmergencyMax } `
@@ -408,6 +530,7 @@ try {
             $taskDefinitionValid = $task -and (Test-PrimaryTaskDefinition -Task $task)
             if ($task -and -not $taskDefinitionValid) {
                 $pendingCount = 0
+                $transientCount = 0
                 $pendingClock.Reset()
                 [void](Invoke-EmergencyRecovery -Reason 'Primary task definition was altered.')
             }
@@ -416,6 +539,7 @@ try {
                 $taskState = if ($task) { [string]$task.State } else { 'MISSING' }
                 if (-not $taskHealthy) {
                     $pendingCount = 0
+                    $transientCount = 0
                     $pendingClock.Reset()
                     [void](Invoke-EmergencyRecovery -Reason "Task state: $taskState; task definition valid: $taskDefinitionValid; heartbeat: $($health.detail)")
                 }
@@ -440,15 +564,36 @@ try {
                         }
                     }
                 }
+                elseif ($health.disposition -eq 'TRANSIENT') {
+                    $pendingCount = 0
+                    $pendingClock.Reset()
+                    $decision = Get-HeartbeatRecoveryDecision -Disposition 'TRANSIENT' -PreviousPendingCount 0 `
+                        -PendingElapsedSeconds 0 -VerifyMaxAfterSeconds ([int]$integrityState.config.verifyMaxAfterSeconds) `
+                        -PreviousTransientCount $transientCount -TransientTolerance $TransientHeartbeatTolerance
+                    $transientCount = [int]$decision.nextTransientCount
+                    if ($decision.action -eq 'WAIT_PRIMARY') {
+                        Write-WatchdogEvent 'heartbeat_unreadable_observing' "count=$transientCount; tolerance=$TransientHeartbeatTolerance; detail=$($health.detail)"
+                    }
+                    else {
+                        Write-WatchdogEvent 'heartbeat_unreadable_threshold' "count=$transientCount; tolerance=$TransientHeartbeatTolerance; detail=$($health.detail)"
+                        [void](Invoke-EmergencyRecovery -Reason "Unreadable heartbeat across $transientCount polls: $($health.detail)")
+                        $transientCount = 0
+                    }
+                }
                 elseif ($health.disposition -eq 'HEALTHY_VERIFIED') {
                     if ($pendingCount -gt 0) {
                         Write-WatchdogEvent 'reassert_pending_cleared' "count=$pendingCount; elapsedSeconds=$([math]::Round($pendingClock.Elapsed.TotalSeconds,1))"
                     }
+                    if ($transientCount -gt 0) {
+                        Write-WatchdogEvent 'heartbeat_unreadable_cleared' "count=$transientCount"
+                    }
                     $pendingCount = 0
+                    $transientCount = 0
                     $pendingClock.Reset()
                 }
                 else {
                     $pendingCount = 0
+                    $transientCount = 0
                     $pendingClock.Reset()
                     [void](Invoke-EmergencyRecovery -Reason "Task state: $taskState; task definition valid: $taskDefinitionValid; heartbeat: $($health.detail)")
                 }
@@ -456,6 +601,7 @@ try {
         }
         catch {
             $pendingCount = 0
+            $transientCount = 0
             $pendingClock.Reset()
             [void](Invoke-EmergencyRecovery -Reason "Unhandled watchdog loop error: $($_.Exception.Message)")
         }

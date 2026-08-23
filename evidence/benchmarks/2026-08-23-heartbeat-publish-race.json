@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "testedAt": "2026-08-23T10:52:00-03:00",
+  "scenario": "Concurrent publish/read of adaptive-fan-status.json, writer and reader in separate runspaces, 4000 publishes against 4000 reads, no pacing",
+  "note": "Deliberately harsher than production, where the controller publishes every 2 s and the watchdog reads every 10 s. It measures the raw collision window, not the deployed collision rate.",
+  "iterations": 4000,
+  "cases": [
+    {
+      "name": "previous publish and read",
+      "writer": "Move-Item -Force",
+      "reader": "Test-Path then Get-Content -Raw",
+      "readerAttempts": 1,
+      "failedReads": 609,
+      "failedReadPct": 15.22,
+      "firstDetail": "Primary heartbeat is missing."
+    },
+    {
+      "name": "atomic publish with previous reader",
+      "writer": "File.Replace",
+      "reader": "Test-Path then Get-Content -Raw",
+      "readerAttempts": 1,
+      "failedReads": 2116,
+      "failedReadPct": 52.9,
+      "firstDetail": "document parsed as null",
+      "note": "Recorded to show the two halves must ship together; Get-Content does not share the replace."
+    },
+    {
+      "name": "atomic publish with sharing reader, no retry",
+      "writer": "File.Replace",
+      "reader": "File.Open sharing ReadWrite+Delete",
+      "readerAttempts": 1,
+      "failedReads": 156,
+      "failedReadPct": 3.9,
+      "firstDetail": "Could not find file"
+    },
+    {
+      "name": "shipped configuration",
+      "writer": "File.Replace",
+      "reader": "File.Open sharing ReadWrite+Delete",
+      "readerAttempts": 5,
+      "failedReads": 0,
+      "failedReadPct": 0.0,
+      "firstDetail": null
+    }
+  ],
+  "failedWritesAllCases": 0,
+  "residualRiskHandling": "A read that still fails is classified TRANSIENT and must repeat across TransientHeartbeatTolerance consecutive 10 s polls before any recovery runs.",
+  "status": "PASS"
+}

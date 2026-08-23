@@ -63,6 +63,30 @@ function Write-ControllerStatus {
     param([System.Collections.IDictionary] $Status)
     $temporaryPath = "$StatusPath.tmp"
     [System.IO.File]::WriteAllText($temporaryPath, ($Status | ConvertTo-Json -Depth 8), [System.Text.UTF8Encoding]::new($false))
+
+    # Move-Item -Force unlinks the destination before renaming it, so a concurrent reader can
+    # observe the heartbeat as missing or half-written. File.Replace swaps the directory entry
+    # atomically: the watchdog always sees either the previous document or the new one.
+    for ($attempt = 1; $attempt -le 10; $attempt++) {
+        try {
+            if (Test-Path -LiteralPath $StatusPath -PathType Leaf) {
+                # PowerShell binds a bare $null to String.Empty, which Replace rejects; NullString passes a real null.
+                [System.IO.File]::Replace($temporaryPath, $StatusPath, [NullString]::Value, $true)
+            }
+            else {
+                [System.IO.File]::Move($temporaryPath, $StatusPath)
+            }
+            return
+        }
+        catch [System.IO.IOException] {
+            # A reader holds the destination open for this instant. Retry rather than fall back
+            # immediately to the non-atomic rename.
+            Start-Sleep -Milliseconds 50
+        }
+    }
+
+    # Publishing the heartbeat matters more than publishing it atomically: a heartbeat the
+    # watchdog never sees reads as a dead controller. The reader tolerates the residual gap.
     Move-Item -LiteralPath $temporaryPath -Destination $StatusPath -Force
 }
 
@@ -180,6 +204,7 @@ function Assert-ControllerConfiguration {
         sensorFailureSamples = @(1, 30)
         rpmMismatchSamples = @(1, 30)
         minMaxSeconds = @(0, 7200)
+        startupMinMaxSeconds = @(0, 7200)
         rpmReassertMinIntervalSeconds = @(1, 300)
         verifyMaxAfterSeconds = @(1, 300)
         telemetryEverySamples = @(1, 3600)
@@ -229,6 +254,7 @@ function Assert-ControllerConfiguration {
     if ([double]$Configuration.criticalSystemC -lt [double]$Configuration.maxSystemC) { throw 'criticalSystemC must not be lower than maxSystemC.' }
     if ([double]$Configuration.temperatureWindowSeconds -lt [double]$Configuration.pollSeconds) { throw 'temperatureWindowSeconds must be at least pollSeconds.' }
     if ([double]$Configuration.releaseCpuLoadPct -ge [double]$Configuration.preemptCpuLoadPct) { throw 'releaseCpuLoadPct must be lower than preemptCpuLoadPct.' }
+    if ([double]$Configuration.startupMinMaxSeconds -gt [double]$Configuration.minMaxSeconds) { throw 'startupMinMaxSeconds must not exceed minMaxSeconds.' }
 }
 
 if (-not (Test-Path -LiteralPath $ConfigPath)) { throw "Configuration not found: $ConfigPath" }
@@ -242,6 +268,7 @@ $outputDirectory = Split-Path -Parent $LogPath
 if (-not (Test-Path -LiteralPath $outputDirectory)) { New-Item -ItemType Directory -Path $outputDirectory -Force | Out-Null }
 
 $simulation = $null
+$simulationStartupMaxHold = $false
 $script:Gaming = $null
 $script:SimulationAutoReadbacks = $null
 $script:SimulationAutoReadbackMode = $false
@@ -249,6 +276,10 @@ $mutex = $null
 if ($SimulationPath) {
     $simulation = Get-Content -LiteralPath $SimulationPath -Raw | ConvertFrom-Json
     if ($simulation.initialState) { $InitialState = [string]$simulation.initialState }
+    # A fixture that merely starts in MAX is not the same thing as the fail-safe MAX the controller
+    # adopts before it has read a sample, so simulations opt into the startup hold explicitly.
+    $startupHoldProperty = $simulation.PSObject.Properties['startupMaxHold']
+    if ($null -ne $startupHoldProperty) { $simulationStartupMaxHold = [bool]$startupHoldProperty.Value }
     $script:SimulationAutoReadbacks = [System.Collections.Generic.Queue[object]]::new()
     $autoReadbacksProperty = $simulation.PSObject.Properties['autoWriteReadbacks']
     if ($null -ne $autoReadbacksProperty) {
@@ -277,6 +308,10 @@ $lastMaxWriteSeconds = -1000.0
 $maxSince = if ($state -eq 'MAX') { Get-Date } else { [datetime]::MinValue }
 $maxSinceSeconds = 0.0
 $maxVerificationPending = $state -eq 'MAX'
+# The MAX the controller adopts before it has read a single sample is a fail-safe default, not a
+# response to measured heat. While that default is still in force the release gate uses
+# startupMinMaxSeconds; every MAX entered from a real trigger keeps the full minMaxSeconds floor.
+$startupMaxHold = $simulationStartupMaxHold -and $state -eq 'MAX'
 $rpmMismatchSamples = 0
 $temperatureHistory = [System.Collections.Generic.Queue[object]]::new()
 $transitionHistory = [System.Collections.Generic.List[object]]::new()
@@ -292,8 +327,9 @@ try {
         $lastMaxWrite = Get-Date
         $lastMaxWriteSeconds = $monotonic.Elapsed.TotalSeconds
         $maxVerificationPending = $true
+        $startupMaxHold = $true
     }
-    Write-ControllerEvent -Event 'controller_started' -Data @{ state = $state; simulation = [bool]$simulation }
+    Write-ControllerEvent -Event 'controller_started' -Data @{ state = $state; simulation = [bool]$simulation; startupMaxHold = [bool]$startupMaxHold }
 
     $simulationIndex = 0
     while ($true) {
@@ -376,6 +412,7 @@ try {
                     $lastMaxWrite = $now
                     $lastMaxWriteSeconds = $elapsedSeconds
                     $maxVerificationPending = $true
+                    $startupMaxHold = $false
                     $rpmMismatchSamples = 0
                     $reason = if ($critical) { 'critical_temperature' } elseif ($loadSamples -ge [int]$script:Config.preemptLoadSamples) { 'sustained_cpu_load' } elseif ($rapidRise) { 'rapid_temperature_rise' } else { 'sustained_temperature' }
                     $transition = [ordered]@{ at = $now.ToString('o'); from = 'AUTO'; to = 'MAX'; reason = $reason }
@@ -400,6 +437,7 @@ try {
                             $lastMaxWrite = $now
                             $lastMaxWriteSeconds = $elapsedSeconds
                             $maxVerificationPending = $true
+                            $startupMaxHold = $false
                             $coolSamples = 0
                             $rpmMismatchSamples = 0
                             $transition = [ordered]@{ at = $now.ToString('o'); from = 'AUTO'; to = 'MAX'; reason = 'auto_readback_fail_safe' }
@@ -419,7 +457,15 @@ try {
                 if ($releaseReset) { $coolSamples = 0 }
                 elseif ($releaseIdleSample) { $coolSamples++ }
                 $heldSeconds = $elapsedSeconds - $maxSinceSeconds
-                if ($heldSeconds -ge [double]$script:Config.minMaxSeconds -and
+                # Only the unproven startup default may leave early, and only after releaseSamples
+                # of verified cool, idle, trend-stable telemetry.
+                $minimumHeldSeconds = if ($startupMaxHold) {
+                    [double]$script:Config.startupMinMaxSeconds
+                }
+                else {
+                    [double]$script:Config.minMaxSeconds
+                }
+                if ($heldSeconds -ge $minimumHeldSeconds -and
                     $coolSamples -ge [int]$script:Config.releaseSamples -and
                     $releaseIdleSample -and
                     $releaseTrendStable) {
@@ -436,7 +482,9 @@ try {
                         throw
                     }
                     $state = 'AUTO'
-                    $transition = [ordered]@{ at = $now.ToString('o'); from = 'MAX'; to = 'AUTO'; reason = 'sustained_cool_idle' }
+                    $releaseReason = if ($startupMaxHold) { 'startup_max_released_on_verified_cool' } else { 'sustained_cool_idle' }
+                    $startupMaxHold = $false
+                    $transition = [ordered]@{ at = $now.ToString('o'); from = 'MAX'; to = 'AUTO'; reason = $releaseReason }
                     $transitionHistory.Add($transition)
                     Write-ControllerEvent -Event 'profile_changed' -Data $transition
                     $coolSamples = 0
@@ -490,6 +538,7 @@ try {
                 loadSamples = $loadSamples
                 coolSamples = $coolSamples
                 failureSamples = $failureSamples
+                startupMaxHold = [bool]$startupMaxHold
                 status = if ($simulation) {
                     'SIMULATION'
                 }
@@ -531,6 +580,7 @@ try {
                     $lastMaxWrite = $now
                     $lastMaxWriteSeconds = $elapsedSeconds
                     $maxVerificationPending = $true
+                    $startupMaxHold = $false
                     $rpmMismatchSamples = 0
                 }
             }

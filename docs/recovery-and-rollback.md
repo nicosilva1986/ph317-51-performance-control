@@ -17,6 +17,8 @@ Before replacing a running version:
 7. Require bounded semantic health (`HEALTHY_VERIFIED`, expected state/mode/RPM), exact task principal/action and recursive ACL validation.
 8. On any failure, roll back to the prior version or leave hardware in `MAX`; never silently continue in Auto.
 
+Watchdog recovery of a running installation follows the same fail-closed order — stop the primary, acquire its write lease, request `MAX`, release the lease, restart the primary — and reports `RECOVERY_FAILED` if any step fails. Because that outcome leaves the fans at `MAX` with no controller, repeated failures are bounded: after `RecoveryReregisterThreshold` consecutive failures the watchdog re-registers the primary task from its trusted definition and logs `primary_task_reregistered`. Recovery attempts, their reasons and that escalation are all recorded in `watchdog.jsonl`.
+
 ## CRU disk-filter correction
 
 The current binding is boot-critical and requires a physical maintenance window.
