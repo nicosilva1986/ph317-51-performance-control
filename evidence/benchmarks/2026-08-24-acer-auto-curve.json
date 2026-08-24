@@ -1,0 +1,123 @@
+﻿{
+    "schemaVersion":  1,
+    "createdAt":  "2026-08-24T11:46:25.3008370-03:00",
+    "platform":  "Acer Predator PH317-51 / Intel Core i7-7700HQ",
+    "abortarEnC":  92,
+    "fase1":  {
+                  "muestras":  120,
+                  "abortado":  true,
+                  "motivoAborto":  "CPU 92 C",
+                  "tempMaxC":  92,
+                  "rpmMaxAuto":  4761,
+                  "porTemperatura":  [
+                                         {
+                                             "tempBucketC":  50,
+                                             "n":  46,
+                                             "rpmP50":  2500,
+                                             "rpmP90":  2521,
+                                             "rpmMax":  2654
+                                         },
+                                         {
+                                             "tempBucketC":  55,
+                                             "n":  37,
+                                             "rpmP50":  2970,
+                                             "rpmP90":  3000,
+                                             "rpmMax":  3409
+                                         },
+                                         {
+                                             "tempBucketC":  60,
+                                             "n":  12,
+                                             "rpmP50":  3409,
+                                             "rpmP90":  3846,
+                                             "rpmMax":  4109
+                                         },
+                                         {
+                                             "tempBucketC":  65,
+                                             "n":  4,
+                                             "rpmP50":  3846,
+                                             "rpmP90":  4000,
+                                             "rpmMax":  4411
+                                         },
+                                         {
+                                             "tempBucketC":  75,
+                                             "n":  5,
+                                             "rpmP50":  3370,
+                                             "rpmP90":  3797,
+                                             "rpmMax":  4687
+                                         },
+                                         {
+                                             "tempBucketC":  80,
+                                             "n":  2,
+                                             "rpmP50":  3370,
+                                             "rpmP90":  3370,
+                                             "rpmMax":  3409
+                                         },
+                                         {
+                                             "tempBucketC":  85,
+                                             "n":  6,
+                                             "rpmP50":  3750,
+                                             "rpmP90":  3846,
+                                             "rpmMax":  4347
+                                         },
+                                         {
+                                             "tempBucketC":  90,
+                                             "n":  8,
+                                             "rpmP50":  4687,
+                                             "rpmP90":  4687,
+                                             "rpmMax":  4761
+                                         }
+                                     ]
+              },
+    "fase2":  {
+                  "payload":  "0x00C30009",
+                  "puntos":  [
+                                 {
+                                     "percent":  40,
+                                     "aceptado":  true,
+                                     "rpmP50":  3000,
+                                     "rpmMin":  2941,
+                                     "rpmMax":  5000,
+                                     "muestras":  20,
+                                     "enModo3":  20,
+                                     "derivoDeModo3":  0
+                                 },
+                                 {
+                                     "percent":  60,
+                                     "aceptado":  true,
+                                     "rpmP50":  4285,
+                                     "rpmMin":  4285,
+                                     "rpmMax":  4347,
+                                     "muestras":  20,
+                                     "enModo3":  20,
+                                     "derivoDeModo3":  0
+                                 },
+                                 {
+                                     "percent":  80,
+                                     "aceptado":  true,
+                                     "rpmP50":  5454,
+                                     "rpmMin":  5454,
+                                     "rpmMax":  5555,
+                                     "muestras":  20,
+                                     "enModo3":  20,
+                                     "derivoDeModo3":  0
+                                 },
+                                 {
+                                     "percent":  100,
+                                     "aceptado":  true,
+                                     "rpmP50":  6122,
+                                     "rpmMin":  6122,
+                                     "rpmMax":  6122,
+                                     "muestras":  20,
+                                     "enModo3":  20,
+                                     "derivoDeModo3":  0
+                                 }
+                             ],
+                  "aceptados":  4,
+                  "monotona":  true,
+                  "veredicto":  "CUSTOM_VALIDO"
+              },
+    "whea":  {
+                 "durante":  0
+             },
+    "status":  "COMPLETE"
+}

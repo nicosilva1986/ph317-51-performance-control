@@ -28,6 +28,12 @@ GPU mode 3 << 22  = 0x00C00000
 records successful readback on the reference machine.** Treat it as a
 laboratory hypothesis only.
 
+## Runner
+
+Implemented by [`tools/EJECUTAR-Medicion.cmd`](../tools/EJECUTAR-Medicion.cmd),
+which self-elevates, keeps its window open and writes a transcript. Phase 1
+(Acer's stock curve, `AUTO` only) can be run alone with `-SoloFase1`.
+
 ## Safety constraints
 
 - Physical console; AC power preferred.

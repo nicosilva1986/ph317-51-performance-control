@@ -300,6 +300,7 @@ function Assert-ControllerConfiguration {
         rpmMismatchSamples = @(1, 30)
         minMaxSeconds = @(0, 7200)
         startupMinMaxSeconds = @(0, 7200)
+        startupReleaseSamples = @(1, 3600)
         curveMinTempC = @(30, 95)
         curveMaxTempC = @(35, 100)
         curveMinPct = @(10, 100)
@@ -360,6 +361,14 @@ function Assert-ControllerConfiguration {
     if ([double]$Configuration.temperatureWindowSeconds -lt [double]$Configuration.pollSeconds) { throw 'temperatureWindowSeconds must be at least pollSeconds.' }
     if ([double]$Configuration.releaseCpuLoadPct -ge [double]$Configuration.preemptCpuLoadPct) { throw 'releaseCpuLoadPct must be lower than preemptCpuLoadPct.' }
     if ([double]$Configuration.startupMinMaxSeconds -gt [double]$Configuration.minMaxSeconds) { throw 'startupMinMaxSeconds must not exceed minMaxSeconds.' }
+    # The startup default is the weakest claim the controller can hold, so the evidence needed to
+    # drop it must never be stronger than the evidence needed to drop a MAX entered from real heat.
+    if ([double]$Configuration.startupReleaseSamples -gt [double]$Configuration.releaseSamples) { throw 'startupReleaseSamples must not exceed releaseSamples.' }
+
+    $startupReleaseLoadProperty = $Configuration.PSObject.Properties['startupReleaseIgnoresLoad']
+    if ($null -eq $startupReleaseLoadProperty -or $startupReleaseLoadProperty.Value -isnot [bool]) {
+        throw 'startupReleaseIgnoresLoad must be present and boolean.'
+    }
 
     $curveEnabledProperty = $Configuration.PSObject.Properties['curveEnabled']
     if ($null -eq $curveEnabledProperty -or $curveEnabledProperty.Value -isnot [bool]) {
@@ -381,6 +390,9 @@ Assert-ControllerConfiguration -Configuration $script:Config
 # Off by default. With curveEnabled false every path below behaves exactly as the AUTO/MAX
 # controller did, so the proportional band cannot activate without an explicit decision.
 $script:CurveEnabled = [bool]$script:Config.curveEnabled
+
+# Scoped strictly to the unproven startup MAX. Every other path keeps the load term.
+$script:StartupReleaseIgnoresLoad = [bool]$script:Config.startupReleaseIgnoresLoad
 if ($ValidateOnly) {
     [ordered]@{ status = 'VALID'; configPath = $ConfigPath } | ConvertTo-Json -Compress
     exit 0
@@ -602,8 +614,21 @@ try {
             }
             else {
                 $hotSamples = 0
+                # The startup MAX is an unproven fail-safe default, not measured heat. Load predicts
+                # heat still to come, which makes it the right gate for *entering* MAX and the wrong
+                # one for leaving a default on a machine the sensors already show is cold. Windows
+                # guarantees a CPU burst for the first seconds after a boot or a resume, so gating
+                # this release on load pinned the fans at 6122 RPM with the package at 41 C.
+                # Temperature still governs: every thermal reset below applies unchanged.
+                $startupRelease = [bool]$startupMaxHold
+                $releaseEvidenceSample = if ($startupRelease -and $script:StartupReleaseIgnoresLoad) {
+                    $releaseThermalEnvelope
+                }
+                else {
+                    $releaseIdleSample
+                }
                 if ($releaseReset) { $coolSamples = 0 }
-                elseif ($releaseIdleSample) { $coolSamples++ }
+                elseif ($releaseEvidenceSample) { $coolSamples++ }
 
                 if ($state -eq 'CURVE') {
                     if ($critical) {
@@ -635,17 +660,23 @@ try {
                 }
 
                 $heldSeconds = $elapsedSeconds - $maxSinceSeconds
-                # Only the unproven startup default may leave early, and only after releaseSamples
-                # of verified cool, idle, trend-stable telemetry.
-                $minimumHeldSeconds = if ($startupMaxHold) {
+                # Only the unproven startup default may leave early, and it still has to earn it with
+                # its own window of verified cool, trend-stable telemetry.
+                $minimumHeldSeconds = if ($startupRelease) {
                     [double]$script:Config.startupMinMaxSeconds
                 }
                 else {
                     [double]$script:Config.minMaxSeconds
                 }
+                $requiredCoolSamples = if ($startupRelease) {
+                    [int]$script:Config.startupReleaseSamples
+                }
+                else {
+                    [int]$script:Config.releaseSamples
+                }
                 if ($heldSeconds -ge $minimumHeldSeconds -and
-                    $coolSamples -ge [int]$script:Config.releaseSamples -and
-                    $releaseIdleSample -and
+                    $coolSamples -ge $requiredCoolSamples -and
+                    $releaseEvidenceSample -and
                     $releaseTrendStable) {
                     try {
                         $verifiedAutoSample = Set-VerifiedAutoProfile
@@ -671,6 +702,33 @@ try {
                     $lastMaxWrite = $now
                     $lastMaxWriteSeconds = $elapsedSeconds
                     $rpmMismatchSamples = 0
+                }
+                elseif ($startupRelease -and $script:CurveEnabled -and $state -eq 'MAX' -and
+                        -not $critical -and $heldSeconds -ge $minimumHeldSeconds) {
+                    # The startup MAX stands in for a temperature nobody had measured yet. Once the
+                    # floor has elapsed and telemetry is valid, that temperature IS known, and the
+                    # proportional band is a measured answer to it. Holding 100 % past this point is
+                    # not failing closed, it is refusing to use a reading already in hand: release
+                    # only ever targets AUTO, so on a machine that stays above releaseCpuC the fans
+                    # would sit at maximum indefinitely with the band never engaging at all.
+                    # A hot machine loses nothing -- the curve answers 82 C with ~95 % -- while a
+                    # merely warm one stops being pinned at 6122 RPM.
+                    $handoverPercent = Get-CurveTargetPercent -TemperatureC $curveTemperature -Configuration $script:Config
+                    Set-HardwareFanProfile -Profile 'CURVE' -Percent $handoverPercent
+                    $curvePercent = $handoverPercent
+                    $curveLastChangeSeconds = $elapsedSeconds
+                    $state = 'CURVE'
+                    $startupMaxHold = $false
+                    $maxVerificationPending = $false
+                    $maxSince = $now
+                    $maxSinceSeconds = $elapsedSeconds
+                    $lastMaxWrite = $now
+                    $lastMaxWriteSeconds = $elapsedSeconds
+                    $rpmMismatchSamples = 0
+                    $coolSamples = 0
+                    $transition = [ordered]@{ at = $now.ToString('o'); from = 'MAX'; to = 'CURVE'; reason = 'startup_max_handed_to_curve' }
+                    $transitionHistory.Add($transition)
+                    Write-ControllerEvent -Event 'profile_changed' -Data $transition
                 }
                 elseif ($state -eq 'CURVE' -and -not $simulation) {
                     # CURVE is firmware mode 3. Anything else means something overwrote the mode,

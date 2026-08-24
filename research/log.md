@@ -2,6 +2,30 @@
 
 Append-only. Newest entries at the top.
 
+## 2026-08-24 — Fans at max on resume; undervolt verdicts
+
+- **Fan incident closed.** "Fans at 100 % after the restart" was this project's
+  own fail-closed startup hold, not a thermal or hardware fault. Overnight sleep
+  left the heartbeat stale by 32 646 s; the watchdog restarted the primary and
+  the controller entered `startupMaxHold`. Released cleanly after 3 min 30 s on
+  `startup_max_released_on_verified_cool`. Machine was 41–60 °C throughout.
+  Root cause of the *duration*: the `releaseCpuLoadPct: 40` term kept resetting
+  the cool counter against the Windows resume burst (47 % load). Written up in
+  `fan-max-on-resume-2026-08-24.md`; a narrow policy fix is proposed, not made.
+- **CPU undervolt proven dead.** -99.6 mV is configured on core and cache and
+  never reaches the silicon: mean VID at a fixed 28x is flat (0.9213 → 0.9356 V,
+  14 mV spread) across a month spanning the change, where a working offset would
+  step ~100 mV. Cause is the CVE-2019-11157 microcode mitigation making MSR
+  `0x150` a silent no-op. Not fixable in software. ThrottleStop retained as a
+  logger and for multiplier caps only.
+- **GPU undervolt proven a regression.** -9.2 % mean SM clock, +1.9 W mean power,
+  power-capped 64 % → 78.8 % of the time, and thermal cap 0 % in *both* runs —
+  the card was never thermally limited. The -3 °C is the signature of a slower
+  card, not efficiency. Revert to stock V/F curve.
+- Both verdicts in `undervolt-effectiveness-2026-08-24.md`. Net: the fan overlay
+  is now the only demonstrated lever on this hardware.
+- Added `docs/handoff.md` as the state-of-play entry point.
+
 ## 2026-08-22 — Research index categories (Option A)
 
 - Grouped notes in `research/README.md` under Platform, Silicon, Ecosystem, Meta.

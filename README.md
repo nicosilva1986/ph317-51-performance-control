@@ -4,7 +4,7 @@ Evidence-led thermal, fan, Turbo Boost, power-policy, and driver hygiene tooling
 
 > Estado: desarrollo privado y experimental. Validado inicialmente en una sola PH317-51. No ejecutar todavía en otro equipo.
 
-**Mapa de docs:** [docs/map.md](docs/map.md) · **Investigación / contexto de plataforma:** [research/](research/README.md)
+**Estado actual:** [docs/handoff.md](docs/handoff.md) · **Mapa de docs:** [docs/map.md](docs/map.md) · **Investigación / contexto de plataforma:** [research/](research/README.md)
 
 ## Por qué existe
 
@@ -37,7 +37,7 @@ Max redujo la máxima 12 °C, redujo el promedio 10,5 °C y mejoró el throughpu
 - **Driver hygiene:** preflight schema v3, seis scripts sellados, backups dobles, journal transaccional y rebind reversible sin `/force`. La recuperación nunca repite una eliminación ambigua. Los binarios de terceros no se publican.
 - **Evidence first:** toda afirmación de rendimiento debe enlazar una carga reproducible, datos térmicos y ausencia/presencia de WHEA.
 
-Ver [mapa](docs/map.md), [uso y pruebas](docs/usage.md), [arquitectura](docs/architecture.md), [superficie WMI](docs/wmi-surface.md), [inventario inicial](docs/hardware-and-driver-baseline.md), [plan Turbo nativo](docs/native-turbo-plan.md), [recuperación](docs/recovery-and-rollback.md), [roadmap de controles siguientes](docs/roadmap-next-controls.md), [experimento Custom %](docs/fan-curve-experiment.md) y [telemetría de límites](docs/limit-telemetry-proposal.md).
+Ver [estado actual](docs/handoff.md), [mapa](docs/map.md), [uso y pruebas](docs/usage.md), [arquitectura](docs/architecture.md), [superficie WMI](docs/wmi-surface.md), [inventario inicial](docs/hardware-and-driver-baseline.md), [plan Turbo nativo](docs/native-turbo-plan.md), [recuperación](docs/recovery-and-rollback.md), [roadmap de controles siguientes](docs/roadmap-next-controls.md), [experimento Custom %](docs/fan-curve-experiment.md) y [telemetría de límites](docs/limit-telemetry-proposal.md).
 
 ## Seguridad
 

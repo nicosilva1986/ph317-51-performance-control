@@ -38,13 +38,14 @@ function Invoke-SimulationCase {
     if ($StartupMaxHold) { $simulation.startupMaxHold = $true }
     if (@($AutoWriteReadbacks).Count -gt 0) { $simulation.autoWriteReadbacks = @($AutoWriteReadbacks) }
     $simulation | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $simulationPath -Encoding utf8
-    $caseConfig = $config
-    if ($CurveEnabled) {
-        $caseConfig = Join-Path $caseRoot 'config.json'
-        $configObject = Get-Content -LiteralPath $config -Raw | ConvertFrom-Json
-        $configObject.curveEnabled = $true
-        $configObject | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $caseConfig -Encoding utf8
-    }
+    # Every case pins curveEnabled explicitly. Leaving it to the shipped default made the
+    # meaning of a case depend on a value the calibration is free to change: when the default
+    # flipped to true, cases written against the AUTO/MAX policy silently started asserting
+    # against the proportional one. A case now tests the mode it names, and nothing else.
+    $caseConfig = Join-Path $caseRoot 'config.json'
+    $configObject = Get-Content -LiteralPath $config -Raw | ConvertFrom-Json
+    $configObject.curveEnabled = [bool]$CurveEnabled
+    $configObject | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $caseConfig -Encoding utf8
     $raw = & $engine -NoLogo -NoProfile -NonInteractive -File $controller -ConfigPath $caseConfig -SimulationPath $simulationPath -LogPath $logPath -StatusPath $statusPath
     if ($LASTEXITCODE -ne 0) { throw "Simulation $Name exited $LASTEXITCODE." }
     return [pscustomobject]@{
@@ -66,6 +67,8 @@ try {
     $loadSamples = [int]$policy.preemptLoadSamples
     $releaseSamples = [int]$policy.releaseSamples
     $residenceSamples = [int][math]::Ceiling([double]$policy.minMaxSeconds / $pollSeconds)
+    $startupReleaseSamples = [int]$policy.startupReleaseSamples
+    $startupHoldSamples = [int][math]::Ceiling([double]$policy.startupMinMaxSeconds / $pollSeconds)
     $demandSamples = $loadSamples + $enterSamples
 
     $coolCpu = [int]$policy.releaseCpuC - 10
@@ -79,7 +82,20 @@ try {
     $criticalCpu = [int]$policy.criticalCpuC + 1
     $envelopeBreachCpu = [int]$policy.releaseCpuC + 2
     $riseCpu = [int]$policy.preemptTemperatureC + 1
-    $jitterCpu = $coolCpu + [int]$policy.releaseRiseToleranceC + 2
+    # Un disturbio de rapid-rise tiene que subir al menos riseTriggerC desde el piso y quedar
+    # por encima de preemptTemperatureC, sin salirse del sobre de release: si se sale, el caso
+    # mide una violacion de sobre en vez del rise. preemptTemperatureC+1 solo alcanzaba mientras
+    # coolCpu estuviera muy por debajo, y dejo de estarlo al mover los umbrales.
+    $riseInsideEnvelopeCpu = [math]::Max([int]$policy.preemptTemperatureC, [int]$coolCpu + [int]$policy.riseTriggerC)
+    # La sacudida tiene que superar releaseRiseToleranceC, para que el chequeo de tendencia
+    # bloquee el release en esa muestra, sin alcanzar riseTriggerC: si lo alcanza dispara
+    # rapid-rise, que resetea el contador, y el caso deja de medir tolerancia para medir
+    # preempcion. Con umbrales juntos un +2 fijo cruzaba esa linea.
+    $jitterCpu = $coolCpu + [int]$policy.releaseRiseToleranceC + 1
+    if (($jitterCpu - $coolCpu) -le [int]$policy.releaseRiseToleranceC -or
+        ($jitterCpu - $coolCpu) -ge [int]$policy.riseTriggerC) {
+        throw 'The jitter fixture no longer sits between the trend tolerance and the rapid-rise trigger.'
+    }
 
     $epoch = [datetimeoffset]'2026-01-01T00:00:00Z'
     # The simulated clock is deterministic: sample n is observed at (n - 1) * pollSeconds.
@@ -91,8 +107,14 @@ try {
     if ([int]$policy.startupMinMaxSeconds -gt [int]$policy.minMaxSeconds) {
         throw 'startupMinMaxSeconds must never exceed the triggered-MAX residence floor.'
     }
+    if ($startupReleaseSamples -gt $releaseSamples) {
+        throw 'startupReleaseSamples must never exceed the evidence a triggered MAX needs to release.'
+    }
     if ([int]$policy.releaseCpuC -ge [int]$policy.maxCpuC -or [int]$policy.maxCpuC -gt [int]$policy.criticalCpuC) {
         throw 'The release, demand and critical CPU thresholds are no longer ordered.'
+    }
+    if ($riseInsideEnvelopeCpu -gt [int]$policy.releaseCpuC) {
+        throw 'A rapid rise can no longer be produced inside the release envelope.'
     }
     if ([int]$policy.preemptTemperatureC -ge [int]$policy.releaseCpuC) {
         throw 'preemptTemperatureC must stay below releaseCpuC, otherwise a rapid rise inside the release envelope is unreachable.'
@@ -106,6 +128,34 @@ try {
     if ([int]$policy.preemptCpuMaxLogicalLoadPct -lt 90) { throw 'A single busy logical core can force MAX again.' }
     if ([double]$policy.preemptLoadSamples * $pollSeconds -lt 10) { throw 'A load burst shorter than ten seconds can force MAX again.' }
     $caseResults.Add([ordered]@{ name = 'release-policy-contract'; status = 'PASS' })
+
+    # --- calibracion medida 2026-08-24 -------------------------------------------------
+    # Acer topa en 4761 RPM de los 6122 disponibles y su curva se aplana entre 65 y 89 C.
+    # La banda proporcional existe para cubrir exactamente esa meseta, asi que arranca
+    # donde antes se entraba a MAX y llega al 100 % antes del umbral critico.
+    if (-not [bool]$policy.curveEnabled) {
+        throw 'The shipped calibration no longer enables the proportional band.'
+    }
+    if ([int]$policy.curveMinTempC -ne [int]$policy.maxCpuC) {
+        throw 'curveMinTempC must equal maxCpuC: the band has to start exactly where MAX would have been entered.'
+    }
+    if ([int]$policy.curveMaxPct -ne 100) {
+        throw 'curveMaxPct must reach 100, otherwise the band repeats the ceiling this project exists to lift.'
+    }
+    if ([int]$policy.curveMaxTempC -gt [int]$policy.criticalCpuC) {
+        throw 'The band must be at full speed before critical takes over.'
+    }
+    $caseResults.Add([ordered]@{ name = 'curve-calibration-contract'; status = 'PASS' })
+
+    # Con la calibracion enviada, calor medido entra en la banda proporcional y no en MAX.
+    $samples = [System.Collections.Generic.List[object]]::new()
+    1..($enterSamples + 3) | ForEach-Object { $samples.Add((New-Sample $hotCpu 0 $coolSystem $coolLoad)) }
+    $case = Invoke-SimulationCase -Name 'shipped-calibration-enters-curve' -InitialState AUTO -Samples $samples -CurveEnabled
+    if (@($case.result.transitions).Count -lt 1 -or $case.result.transitions[0].to -ne 'CURVE' -or
+        $case.status.state -ne 'CURVE' -or [int]$case.status.curvePercent -lt [int]$policy.curveStartPct) {
+        throw 'The shipped calibration entered MAX instead of the proportional band.'
+    }
+    $caseResults.Add([ordered]@{ name = 'shipped-calibration-enters-curve'; status = 'PASS' })
 
     # --- residence and startup ----------------------------------------------------------
     # One sample short of the residence floor: cool evidence alone must not release.
@@ -139,6 +189,37 @@ try {
         throw 'The startup fail-safe MAX did not release once telemetry proved the machine cool.'
     }
     $caseResults.Add([ordered]@{ name = 'startup-max-releases-on-verified-cool'; status = 'PASS' })
+
+    # Regression for the 2026-08-24 resume: the machine was at 41 C with the fans at 6122 RPM
+    # because Windows was still busy finishing its own resume. Cool silicon plus non-idle load must
+    # release the *startup* default, and never before the startupMinMaxSeconds floor.
+    $samples = [System.Collections.Generic.List[object]]::new()
+    1..($startupHoldSamples + $startupReleaseSamples + 5) | ForEach-Object {
+        $samples.Add((New-Sample $coolCpu 0 $coolSystem $nonIdleLoad -MaxLogical $coolLogical))
+    }
+    $case = Invoke-SimulationCase -Name 'startup-max-releases-when-cool-but-busy' -InitialState MAX -Samples $samples -StartupMaxHold
+    if (@($case.result.transitions).Count -ne 1 -or
+        $case.result.transitions[0].reason -ne 'startup_max_released_on_verified_cool' -or
+        $case.status.state -ne 'AUTO' -or [bool]$case.status.startupMaxHold) {
+        throw 'A cold machine held the startup MAX because Windows was busy resuming.'
+    }
+    if (([datetimeoffset]$case.result.transitions[0].at) -lt $epoch.AddSeconds([int]$policy.startupMinMaxSeconds)) {
+        throw 'The startup MAX released before the startupMinMaxSeconds floor.'
+    }
+    $caseResults.Add([ordered]@{ name = 'startup-max-releases-when-cool-but-busy'; status = 'PASS' })
+
+    # The other half of the same contract: dropping the load term must not let a machine outside the
+    # thermal envelope leave the startup MAX, no matter how idle it is or how long it waits.
+    $samples = [System.Collections.Generic.List[object]]::new()
+    1..(($startupHoldSamples + $releaseSamples) * 2) | ForEach-Object {
+        $samples.Add((New-Sample $envelopeBreachCpu 0 $coolSystem $coolLoad -MaxLogical $coolLogical))
+    }
+    $case = Invoke-SimulationCase -Name 'startup-max-holds-outside-thermal-envelope' -InitialState MAX -Samples $samples -StartupMaxHold
+    if (@($case.result.transitions).Count -ne 0 -or $case.status.state -ne 'MAX' -or
+        [int]$case.status.coolSamples -ne 0 -or -not [bool]$case.status.startupMaxHold) {
+        throw 'The startup MAX released with the CPU outside the release envelope.'
+    }
+    $caseResults.Add([ordered]@{ name = 'startup-max-holds-outside-thermal-envelope'; status = 'PASS' })
 
     # A trigger firing while the startup hold is in force promotes it to the full residence:
     # from that point there is measured heat, not just an unproven default.
@@ -194,21 +275,40 @@ try {
 
     $curveConfig = $policy
 
+    # Puntos derivados de la banda configurada. Antes eran temperaturas y porcentajes fijos
+    # atados a la calibracion 45-75 C / 30-100 %, asi que recalibrar leia como curva rota.
+    $cBand       = [double]$curveConfig.curveMaxTempC - [double]$curveConfig.curveMinTempC
+    # El piso de la banda, no un punto "dentro": con bandas angostas cualquier fraccion
+    # del ancho cae dentro de la histeresis de bajada y el caso deja de medir el escalon.
+    $tInsideLow  = [double]$curveConfig.curveMinTempC
+    $tInsideHigh = [double]$curveConfig.curveMinTempC + $cBand * 0.75
+
     # Linear interpolation, clamped at both ends, quantised upward so a step never commands less
-    # cooling than the curve asks for.
-    $expectations = @(
-        @{ temp = 30.0; percent = 30 },
-        @{ temp = 45.0; percent = 30 },
-        @{ temp = 50.0; percent = 45 },
-        @{ temp = 60.0; percent = 65 },
-        @{ temp = 75.0; percent = 100 },
-        @{ temp = 95.0; percent = 100 }
-    )
-    foreach ($expectation in $expectations) {
-        $actual = Get-CurveTargetPercent -TemperatureC ([double]$expectation.temp) -Configuration $curveConfig
-        if ($actual -ne [int]$expectation.percent) {
-            throw "Curve at $($expectation.temp) C returned $actual %, expected $($expectation.percent) %."
-        }
+    # cooling than the curve asks for. Derived from the policy rather than pinned to one
+    # calibration: hard-coded percentages made a recalibration look like a broken curve.
+    $cMinT = [double]$curveConfig.curveMinTempC
+    $cMaxT = [double]$curveConfig.curveMaxTempC
+    $cMinP = [int]$curveConfig.curveMinPct
+    $cMaxP = [int]$curveConfig.curveMaxPct
+    $cStep = [double]$curveConfig.curveStepPct
+
+    foreach ($t in ($cMinT - 20), ($cMinT - 0.5), $cMinT) {
+        $actual = Get-CurveTargetPercent -TemperatureC ([double]$t) -Configuration $curveConfig
+        if ($actual -ne $cMinP) { throw "Curve at $t C returned $actual %, expected the floor $cMinP %." }
+    }
+    foreach ($t in $cMaxT, ($cMaxT + 0.5), ($cMaxT + 20)) {
+        $actual = Get-CurveTargetPercent -TemperatureC ([double]$t) -Configuration $curveConfig
+        if ($actual -ne $cMaxP) { throw "Curve at $t C returned $actual %, expected the ceiling $cMaxP %." }
+    }
+    # Inside the band: never below the linear value (upward quantisation), never above it by a
+    # whole step, and never outside the configured bounds.
+    for ($f = 0.1; $f -lt 1.0; $f += 0.1) {
+        $t = $cMinT + ($cMaxT - $cMinT) * $f
+        $linear = $cMinP + ($cMaxP - $cMinP) * $f
+        $actual = Get-CurveTargetPercent -TemperatureC ([double]$t) -Configuration $curveConfig
+        if ($actual -lt $linear) { throw "Curve at $t C returned $actual %, below the linear $([math]::Round($linear,1)) %." }
+        if ($actual -ge $linear + $cStep) { throw "Curve at $t C returned $actual %, more than one step above the linear $([math]::Round($linear,1)) %." }
+        if ($actual -lt $cMinP -or $actual -gt $cMaxP) { throw "Curve at $t C returned $actual %, outside [$cMinP,$cMaxP]." }
     }
     $caseResults.Add([ordered]@{ name = 'curve-interpolates-and-clamps'; status = 'PASS' })
 
@@ -224,55 +324,112 @@ try {
     $caseResults.Add([ordered]@{ name = 'curve-is-monotonic-and-bounded'; status = 'PASS' })
 
     # MINSTART: the first command has to spin the fans up even where the curve asks for less.
-    $command = Get-CurveCommand -AveragedTemperatureC 46.0 -CurrentPercent 0 -SecondsSinceLastChange 0 -Configuration $curveConfig
-    if ($command.percent -ne [int]$curveConfig.curveStartPct -or -not $command.changed -or $command.reason -ne 'curve_start') {
+    # MINSTART es un piso, no un valor fijo: el primer comando nunca queda por debajo de
+    # curveStartPct ni por debajo de lo que la curva pide a esa temperatura.
+    $tStart        = [double]$curveConfig.curveMinTempC
+    $targetAtStart = Get-CurveTargetPercent -TemperatureC $tStart -Configuration $curveConfig
+    $expectedStart = [math]::Max([int]$curveConfig.curveStartPct, [int]$targetAtStart)
+    $command = Get-CurveCommand -AveragedTemperatureC $tStart -CurrentPercent 0 -SecondsSinceLastChange 0 -Configuration $curveConfig
+    if ($command.percent -ne $expectedStart -or -not $command.changed -or $command.reason -ne 'curve_start') {
         throw "Curve start ignored curveStartPct: got $($command.percent) % ($($command.reason))."
     }
     $caseResults.Add([ordered]@{ name = 'curve-start-honours-minstart'; status = 'PASS' })
 
     # More cooling is never delayed.
-    $command = Get-CurveCommand -AveragedTemperatureC 70.0 -CurrentPercent 40 -SecondsSinceLastChange 0 -Configuration $curveConfig
-    if ($command.percent -ne 90 -or -not $command.changed -or $command.reason -ne 'curve_increase') {
+    $pInsideLow  = Get-CurveTargetPercent -TemperatureC $tInsideLow  -Configuration $curveConfig
+    $pInsideHigh = Get-CurveTargetPercent -TemperatureC $tInsideHigh -Configuration $curveConfig
+    if ($pInsideHigh -le $pInsideLow) { throw 'The band is too narrow to exercise an increase.' }
+    $command = Get-CurveCommand -AveragedTemperatureC $tInsideHigh -CurrentPercent $pInsideLow -SecondsSinceLastChange 0 -Configuration $curveConfig
+    if ($command.percent -ne $pInsideHigh -or -not $command.changed -or $command.reason -ne 'curve_increase') {
         throw "Curve increase was delayed or wrong: got $($command.percent) % ($($command.reason))."
     }
     $caseResults.Add([ordered]@{ name = 'curve-increase-is-immediate'; status = 'PASS' })
 
     # Reductions wait for the dwell, then for the falling hysteresis. Both gates exist so an
     # intermittent workload cannot make the fans audibly pump.
-    $command = Get-CurveCommand -AveragedTemperatureC 46.0 -CurrentPercent 90 -SecondsSinceLastChange 10 -Configuration $curveConfig
-    if ($command.changed -or $command.percent -ne 90 -or $command.reason -ne 'curve_decrease_hold') {
+    $command = Get-CurveCommand -AveragedTemperatureC $tInsideLow -CurrentPercent $pInsideHigh -SecondsSinceLastChange 10 -Configuration $curveConfig
+    if ($command.changed -or $command.percent -ne $pInsideHigh -or $command.reason -ne 'curve_decrease_hold') {
         throw "Curve decreased before curveDecreaseHoldSeconds: $($command.reason)."
     }
     $caseResults.Add([ordered]@{ name = 'curve-decrease-waits-for-dwell'; status = 'PASS' })
 
-    $releaseTemperature = Get-CurveReleaseTemperature -Percent 90 -Configuration $curveConfig
+    $releaseTemperature = Get-CurveReleaseTemperature -Percent $pInsideHigh -Configuration $curveConfig
     $justInside = $releaseTemperature - 1.0
-    $command = Get-CurveCommand -AveragedTemperatureC $justInside -CurrentPercent 90 -SecondsSinceLastChange 600 -Configuration $curveConfig
+    $command = Get-CurveCommand -AveragedTemperatureC $justInside -CurrentPercent $pInsideHigh -SecondsSinceLastChange 600 -Configuration $curveConfig
     if ($command.changed -or $command.reason -ne 'curve_decrease_hysteresis') {
         throw "Curve decreased inside the hysteresis band: $($command.reason)."
     }
     $caseResults.Add([ordered]@{ name = 'curve-decrease-respects-hysteresis'; status = 'PASS' })
 
-    $command = Get-CurveCommand -AveragedTemperatureC 60.0 -CurrentPercent 90 -SecondsSinceLastChange 600 -Configuration $curveConfig
-    if (-not $command.changed -or $command.percent -ne 65 -or $command.reason -ne 'curve_decrease') {
+    if ($tInsideLow -gt ($releaseTemperature - [double]$curveConfig.curveDecreaseHysteresisC)) {
+        throw 'tInsideLow must sit below the falling hysteresis edge, not merely below the release temperature.'
+    }
+    $command = Get-CurveCommand -AveragedTemperatureC $tInsideLow -CurrentPercent $pInsideHigh -SecondsSinceLastChange 600 -Configuration $curveConfig
+    if (-not $command.changed -or $command.percent -ne $pInsideLow -or $command.reason -ne 'curve_decrease') {
         throw "Curve never stepped down: got $($command.percent) % ($($command.reason))."
     }
     $caseResults.Add([ordered]@{ name = 'curve-decrease-eventually-steps-down'; status = 'PASS' })
 
-    $command = Get-CurveCommand -AveragedTemperatureC 60.0 -CurrentPercent 65 -SecondsSinceLastChange 600 -Configuration $curveConfig
+    $command = Get-CurveCommand -AveragedTemperatureC $tInsideLow -CurrentPercent $pInsideLow -SecondsSinceLastChange 600 -Configuration $curveConfig
     if ($command.changed -or $command.reason -ne 'curve_steady') {
         throw "Curve rewrote an unchanged percentage: $($command.reason)."
     }
     $caseResults.Add([ordered]@{ name = 'curve-steady-writes-nothing'; status = 'PASS' })
 
-    # End to end: demand at 50 C must reach the proportional band, not 6122 RPM.
+    # Puntos end-to-end, tambien derivados: uno por debajo del piso de la banda y otro bien
+    # dentro de ella, con sus porcentajes esperados calculados desde la curva configurada.
+    $tCurveCool = [int]$coolCpu
+    $tCurveHot  = [int]$tInsideHigh
+    $pCurveCool = [math]::Max([int]$curveConfig.curveStartPct, [int](Get-CurveTargetPercent -TemperatureC ([double]$tCurveCool) -Configuration $curveConfig))
+    $pCurveHot  = [int](Get-CurveTargetPercent -TemperatureC ([double]$tCurveHot) -Configuration $curveConfig)
+    if ($pCurveHot -le $pCurveCool) { throw 'The end-to-end curve points do not straddle a percentage change.' }
+
+    # Una maquina caliente y ocupada nunca alcanza releaseCpuC, y el release solo apunta a AUTO.
+    # Sin entrega a la banda, el MAX de arranque se queda en 6122 RPM para siempre y la curva
+    # jamas actua. Medido en hardware el 2026-08-24: 32 muestras seguidas a 64-82 C, cool 0.
+    $samples = [System.Collections.Generic.List[object]]::new()
+    1..($startupHoldSamples + 10) | ForEach-Object {
+        $samples.Add((New-Sample $tCurveHot 0 $coolSystem $busyLoad -MaxLogical $coolLogical))
+    }
+    $case = Invoke-SimulationCase -Name 'startup-max-hands-over-to-curve' -InitialState MAX -Samples $samples -StartupMaxHold -CurveEnabled
+    $handover = @($case.result.transitions | Where-Object { $_.reason -eq 'startup_max_handed_to_curve' })
+    if ($handover.Count -ne 1 -or $handover[0].from -ne 'MAX' -or $handover[0].to -ne 'CURVE' -or
+        $case.status.state -ne 'CURVE' -or [int]$case.status.curvePercent -ne $pCurveHot -or
+        [bool]$case.status.startupMaxHold) {
+        throw "The startup MAX never handed over to the band: state=$($case.status.state) percent=$($case.status.curvePercent)."
+    }
+    $caseResults.Add([ordered]@{ name = 'startup-max-hands-over-to-curve'; status = 'PASS' })
+
+    # La entrega es proporcional, no incondicional: una muestra critica sigue exigiendo MAX.
+    $samples = [System.Collections.Generic.List[object]]::new()
+    1..($startupHoldSamples + 10) | ForEach-Object {
+        $samples.Add((New-Sample $criticalCpu 0 $coolSystem $busyLoad -MaxLogical $coolLogical))
+    }
+    $case = Invoke-SimulationCase -Name 'startup-max-never-hands-over-when-critical' -InitialState MAX -Samples $samples -StartupMaxHold -CurveEnabled
+    if (@($case.result.transitions | Where-Object { $_.to -eq 'CURVE' }).Count -ne 0 -or $case.status.state -ne 'MAX') {
+        throw 'A critical machine handed the startup MAX to the proportional band.'
+    }
+    $caseResults.Add([ordered]@{ name = 'startup-max-never-hands-over-when-critical'; status = 'PASS' })
+
+    # Con la banda apagada no hay a donde entregar: el comportamiento anterior queda intacto.
+    $samples = [System.Collections.Generic.List[object]]::new()
+    1..($startupHoldSamples + 10) | ForEach-Object {
+        $samples.Add((New-Sample $tCurveHot 0 $coolSystem $busyLoad -MaxLogical $coolLogical))
+    }
+    $case = Invoke-SimulationCase -Name 'startup-max-without-curve-still-holds' -InitialState MAX -Samples $samples -StartupMaxHold
+    if (@($case.result.transitions).Count -ne 0 -or $case.status.state -ne 'MAX') {
+        throw 'With the band disabled the startup MAX left anyway.'
+    }
+    $caseResults.Add([ordered]@{ name = 'startup-max-without-curve-still-holds'; status = 'PASS' })
+
+    # End to end: demanda en frio debe llegar a la banda proporcional, no a 6122 RPM.
     $curveDemand = [System.Collections.Generic.List[object]]::new()
-    1..$demandSamples | ForEach-Object { $curveDemand.Add((New-Sample 50 0 $coolSystem $busyLoad)) }
+    1..$demandSamples | ForEach-Object { $curveDemand.Add((New-Sample $tCurveCool 0 $coolSystem $busyLoad)) }
     $case = Invoke-SimulationCase -Name 'curve-demand-is-proportional' -InitialState AUTO -Samples $curveDemand -CurveEnabled
     if (@($case.result.transitions).Count -ne 1 -or $case.result.transitions[0].to -ne 'CURVE' -or
         $case.result.transitions[0].reason -ne 'sustained_cpu_load' -or $case.status.state -ne 'CURVE' -or
-        [int]$case.status.curvePercent -ne 45) {
-        throw "Demand at 50 C did not enter the proportional band at 45 %: state=$($case.status.state) percent=$($case.status.curvePercent)."
+        [int]$case.status.curvePercent -ne $pCurveCool) {
+        throw "Cool demand did not enter the proportional band at $pCurveCool %: state=$($case.status.state) percent=$($case.status.curvePercent)."
     }
     $caseResults.Add([ordered]@{ name = 'curve-demand-is-proportional'; status = 'PASS' })
 
@@ -301,10 +458,10 @@ try {
     # Rising demand raises the percentage without waiting.
     $samples = [System.Collections.Generic.List[object]]::new()
     $curveDemand | ForEach-Object { $samples.Add($_) }
-    1..12 | ForEach-Object { $samples.Add((New-Sample 65 0 $coolSystem $busyLoad)) }
+    1..12 | ForEach-Object { $samples.Add((New-Sample $tCurveHot 0 $coolSystem $busyLoad)) }
     $case = Invoke-SimulationCase -Name 'curve-follows-rising-demand' -InitialState AUTO -Samples $samples -CurveEnabled
-    if ($case.status.state -ne 'CURVE' -or [int]$case.status.curvePercent -ne 80) {
-        throw "Rising demand did not raise the curve to 80 %: percent=$($case.status.curvePercent)."
+    if ($case.status.state -ne 'CURVE' -or [int]$case.status.curvePercent -ne $pCurveHot) {
+        throw "Rising demand did not raise the curve to $pCurveHot %: percent=$($case.status.curvePercent)."
     }
     if (@($case.events | Where-Object { $_.event -eq 'curve_speed_changed' -and $_.reason -eq 'curve_increase' }).Count -lt 1) {
         throw 'No curve_increase was recorded while demand was rising.'
@@ -312,13 +469,20 @@ try {
     $caseResults.Add([ordered]@{ name = 'curve-follows-rising-demand'; status = 'PASS' })
 
     # Falling demand holds the previous percentage for the dwell instead of pumping.
+    # Con la banda arrancando en maxCpuC, tCurveHot dispara por temperatura y la entrada ocurre
+    # en enterSamples, no cuando se acumula la carga. El bajon breve tiene que terminar antes de
+    # que venza el dwell contado desde ese cambio, o deja de probar lo que dice probar.
+    $curveHotSamples = $enterSamples + 2
     $curveHotDemand = [System.Collections.Generic.List[object]]::new()
-    1..$demandSamples | ForEach-Object { $curveHotDemand.Add((New-Sample 65 0 $coolSystem $busyLoad)) }
+    1..$curveHotSamples | ForEach-Object { $curveHotDemand.Add((New-Sample $tCurveHot 0 $coolSystem $busyLoad)) }
+    $dwellSamples = [int][math]::Floor([double]$curveConfig.curveDecreaseHoldSeconds / $pollSeconds)
+    $briefDropSamples = $dwellSamples - ($curveHotSamples - $enterSamples) - 1
+    if ($briefDropSamples -lt 3) { throw 'The dwell is too short to exercise a brief drop.' }
     $samples = [System.Collections.Generic.List[object]]::new()
     $curveHotDemand | ForEach-Object { $samples.Add($_) }
-    1..10 | ForEach-Object { $samples.Add((New-Sample 46 0 $coolSystem $busyLoad)) }
+    1..$briefDropSamples | ForEach-Object { $samples.Add((New-Sample $tCurveCool 0 $coolSystem $busyLoad)) }
     $case = Invoke-SimulationCase -Name 'curve-holds-through-brief-drop' -InitialState AUTO -Samples $samples -CurveEnabled
-    if ($case.status.state -ne 'CURVE' -or [int]$case.status.curvePercent -ne 80) {
+    if ($case.status.state -ne 'CURVE' -or [int]$case.status.curvePercent -ne $pCurveHot) {
         throw "A brief drop reduced the curve inside the dwell: percent=$($case.status.curvePercent)."
     }
     $caseResults.Add([ordered]@{ name = 'curve-holds-through-brief-drop'; status = 'PASS' })
@@ -326,9 +490,9 @@ try {
     # Sustained cool demand eventually steps the curve down.
     $samples = [System.Collections.Generic.List[object]]::new()
     $curveHotDemand | ForEach-Object { $samples.Add($_) }
-    1..40 | ForEach-Object { $samples.Add((New-Sample 46 0 $coolSystem $busyLoad)) }
+    1..40 | ForEach-Object { $samples.Add((New-Sample $tCurveCool 0 $coolSystem $busyLoad)) }
     $case = Invoke-SimulationCase -Name 'curve-steps-down-when-sustained' -InitialState AUTO -Samples $samples -CurveEnabled
-    if ($case.status.state -ne 'CURVE' -or [int]$case.status.curvePercent -ge 80) {
+    if ($case.status.state -ne 'CURVE' -or [int]$case.status.curvePercent -ge $pCurveHot) {
         throw "Sustained cool demand never reduced the curve: percent=$($case.status.curvePercent)."
     }
     if (@($case.events | Where-Object { $_.event -eq 'curve_speed_changed' -and $_.reason -eq 'curve_decrease' }).Count -lt 1) {
@@ -352,12 +516,20 @@ try {
     $caseResults.Add([ordered]@{ name = 'isolated-logical-load'; status = 'PASS' })
 
     # A continuing ramp past preemptTemperatureC, still below maxCpuC, so only the rise triggers.
-    $samples = @(
-        (New-Sample $coolCpu 0 $coolSystem $coolLoad),
-        (New-Sample $riseCpu 0 $coolSystem $coolLoad),
-        (New-Sample ($riseCpu + 3) 0 $coolSystem $coolLoad),
-        (New-Sample ($riseCpu + 6) 0 $coolSystem $coolLoad)
-    )
+    # La rampa se deriva de riseTriggerC: con umbrales juntos, un +3/+6 fijo deja de superar el
+    # disparo y el caso pasaba a medir nada. Cada escalon sube riseTriggerC y hacen falta
+    # enterSamples muestras con el disparo activo.
+    $riseStep = [int]$policy.riseTriggerC
+    $riseBase = [math]::Max([int]$riseCpu, [int]$coolCpu + $riseStep)
+    $samples = [System.Collections.Generic.List[object]]::new()
+    $samples.Add((New-Sample $coolCpu 0 $coolSystem $coolLoad))
+    for ($i = 0; $i -lt ($enterSamples + 1); $i++) {
+        $rampTemp = $riseBase + ($i * $riseStep)
+        if ($rampTemp -ge [int]$policy.maxCpuC) {
+            throw 'The rapid-rise ramp reaches maxCpuC, so it would no longer isolate the rise trigger.'
+        }
+        $samples.Add((New-Sample $rampTemp 0 $coolSystem $coolLoad))
+    }
     $case = Invoke-SimulationCase -Name 'rapid-temperature-rise' -InitialState AUTO -Samples $samples
     if (@($case.result.transitions).Count -ne 1 -or $case.result.transitions[0].reason -ne 'rapid_temperature_rise') { throw 'Rapid-rise preemption failed.' }
     $caseResults.Add([ordered]@{ name = 'rapid-temperature-rise'; status = 'PASS' })
@@ -519,7 +691,7 @@ try {
         @{
             name = 'rapid-rise-resets-release'
             message = 'A rapid rise inside the release envelope did not reset the cool interval.'
-            disturbance = { , (New-Sample $riseCpu 0 $coolSystem $coolLoad $coolLogical) }
+            disturbance = { , (New-Sample $riseInsideEnvelopeCpu 0 $coolSystem $coolLoad $coolLogical) }
         }
     )
     foreach ($resetCase in $resetCases) {

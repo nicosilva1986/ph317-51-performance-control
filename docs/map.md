@@ -4,12 +4,13 @@ Read order for humans. Implementation details live in the linked files.
 
 ## Start here
 
-1. [README](../README.md) — why the project exists and measured fan Auto vs Max
-2. [research/platform-thermal-context.md](../research/platform-thermal-context.md) — micro vs Acer platform
-3. [research/cross-vendor-control-landscape.md](../research/cross-vendor-control-landscape.md) — how other brands solve the same class of problem
-4. [research/cpu-gpu-silicon-notes.md](../research/cpu-gpu-silicon-notes.md) — turbo bins, GPU TGP, power limit stack
-5. [architecture.md](architecture.md) — control planes and fail-closed rules
-6. [usage.md](usage.md) — how to run tests and the fan stack on the reference machine
+1. [handoff.md](handoff.md) — **state of play**: what is deployed, what is proven, what is closed
+2. [README](../README.md) — why the project exists and measured fan Auto vs Max
+3. [research/platform-thermal-context.md](../research/platform-thermal-context.md) — micro vs Acer platform
+4. [research/cross-vendor-control-landscape.md](../research/cross-vendor-control-landscape.md) — how other brands solve the same class of problem
+5. [research/cpu-gpu-silicon-notes.md](../research/cpu-gpu-silicon-notes.md) — turbo bins, GPU TGP, power limit stack
+6. [architecture.md](architecture.md) — control planes and fail-closed rules
+7. [usage.md](usage.md) — how to run tests and the fan stack on the reference machine
 
 ## Fan / WMI (daily control plane)
 
