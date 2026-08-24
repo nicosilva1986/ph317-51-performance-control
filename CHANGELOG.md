@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Stopped the startup fail-safe from holding maximum RPM on a machine the sensors already show is cold. On 2026-08-24 a 9-hour sleep left the primary heartbeat stale by 32646 seconds; the watchdog restarted it, the controller adopted its unproven `startupMaxHold` MAX, and both fans ran 6122 RPM for 3 minutes 30 seconds with the package between 41 °C and 60 °C.
+- Scoped the cause precisely: `loadSamples` was 0 at every published sample, so the sustained-demand reset never fired. Temperature excursions hidden between telemetry lines reset the cool counter, and the Windows resume burst above `releaseCpuLoadPct` (40 %) stalled its accumulation in between. Load predicts heat that has not happened yet — the right question when entering MAX, the wrong one when leaving a default adopted before the controller read a single sample.
+- Added `startupReleaseIgnoresLoad` (default true): while `startupMaxHold` is in force, release evidence is the thermal envelope alone. Every thermal reset — envelope breach, rapid rise, sustained demand — is retained unchanged.
+- Added `startupReleaseSamples` (default 15 = 30 seconds), separate from the 30 samples a triggered MAX still needs, and validated to never exceed `releaseSamples`. With `startupMinMaxSeconds` untouched, a clean resume now releases at the 60-second floor instead of stacking a second 60 seconds of perfect samples on top of it.
+- Left the triggered-MAX path alone: a MAX entered from measured heat keeps the full load term and the full `minMaxSeconds` residence. Guarded by two new simulation cases — `startup-max-releases-when-cool-but-busy` and `startup-max-holds-outside-thermal-envelope` — with the suite at 42/42 in both PowerShell engines.
+- Corrected `research/fan-max-on-resume-2026-08-24.md`, which had attributed the whole 3.5-minute window to the load term. Resets and stalls are separate mechanisms and the note now distinguishes them.
+
 - Recalibrated the fan policy so maximum RPM means a machine that is genuinely hot and genuinely busy. Demand now needs CPU ≥72 °C (was 60 °C), or a logical core ≥95 % (was 70 %) sustained for 20 seconds (was 4 seconds), across 3 consecutive samples (was 2). Critical stays immediate at 85 °C (was 75 °C).
 - Made the release envelope reachable. It was CPU ≤55 °C with 2 minutes of unbroken idle, and a normally loaded machine crosses 55 °C every minute or two, so the countdown was reset before it could finish. Now CPU ≤65 °C with 60 seconds, and the minimum MAX residence drops from 5 minutes to 2.
 - Kept `preemptTemperatureC` (62 °C) below `releaseCpuC` (65 °C) on purpose: above it, the thermal-envelope check would always fire first and the rapid-rise trigger would be unreachable.

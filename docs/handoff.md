@@ -124,20 +124,30 @@ Not a fault, and not thermal. Full reconstruction in
 3. A restarted controller enters `startupMaxHold`: fans are pinned at maximum
    until the machine is *verified* cool. Invalid or unknown state must fail
    toward maximum cooling (`AGENTS.md`), so a cold boot into MAX is by design.
-4. Release needs 30 consecutive cool samples at 2 s. The Windows resume/logon
-   CPU burst (47 % load) sits above `releaseCpuLoadPct: 40` and kept resetting
-   the counter — visible as `coolSamples` going 10 → 8.
+4. Release needs 30 consecutive cool samples at 2 s. Temperature excursions
+   hidden between published telemetry lines **reset** that counter, and the
+   Windows resume burst (47 % load, above `releaseCpuLoadPct: 40`) **stalled**
+   its accumulation in between. `loadSamples` was 0 throughout, so the
+   sustained-demand reset never fired.
 5. Released cleanly at 08:13:02, `startup_max_released_on_verified_cool`.
    Fans dropped 6 122 → ~1 950 RPM. Total noise window **3 min 30 s**.
 
 The design held. The cost is up to a few minutes of full-speed fans on every
 resume-from-sleep, which reads to the operator as a failure.
 
-**Proposed follow-up (not implemented, needs a decision):** gate the release
-counter on temperature alone once the startup hold has elapsed, or exempt the
-first ~90 s after a resume from the load term. Both keep the fail-closed
-guarantee while cutting the noise window to roughly the intended 60 s. Do not
-weaken the temperature gate.
+**Fixed on 2026-08-24.** While `startupMaxHold` is in force the release
+evidence is now temperature-only (`startupReleaseIgnoresLoad`, default true) and
+needs `startupReleaseSamples` (15 = 30 s) rather than the full 30. The
+`startupMinMaxSeconds` floor is untouched, so a clean resume releases at the
+**60 s** floor instead of stacking a second 60 s of perfect samples on top.
+
+Every thermal reset is retained, and the triggered-MAX path is unchanged: a MAX
+entered from measured heat still keeps the full load term and the full
+`minMaxSeconds` residence. Guarded by `startup-max-releases-when-cool-but-busy`
+and `startup-max-holds-outside-thermal-envelope`; suite 42/42 in both engines.
+
+Not yet verified on hardware — needs one real suspend/resume cycle to confirm
+the 60 s release in the field.
 
 ---
 
@@ -146,8 +156,8 @@ weaken the temperature gate.
 Ranked by expected value now that undervolt is off the table:
 
 1. **Nothing further on CPU voltage.** Firmware-locked. Closed.
-2. **Fan policy tuning** — shorter, quieter recovery after resume (§4).
-   Cheap, purely software, improves perceived behaviour.
+2. **Confirm the resume fix on hardware** (§4) — one suspend/resume cycle,
+   checking `profile_changed` lands ~60 s after `controller_started`.
 3. **Proportional fan curve** — already in the tree, `curveEnabled: false`.
    Would replace the binary Auto/Max overlay with a band. Needs a measured run
    before being enabled by default.

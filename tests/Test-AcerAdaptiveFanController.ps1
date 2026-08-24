@@ -66,6 +66,8 @@ try {
     $loadSamples = [int]$policy.preemptLoadSamples
     $releaseSamples = [int]$policy.releaseSamples
     $residenceSamples = [int][math]::Ceiling([double]$policy.minMaxSeconds / $pollSeconds)
+    $startupReleaseSamples = [int]$policy.startupReleaseSamples
+    $startupHoldSamples = [int][math]::Ceiling([double]$policy.startupMinMaxSeconds / $pollSeconds)
     $demandSamples = $loadSamples + $enterSamples
 
     $coolCpu = [int]$policy.releaseCpuC - 10
@@ -90,6 +92,9 @@ try {
     }
     if ([int]$policy.startupMinMaxSeconds -gt [int]$policy.minMaxSeconds) {
         throw 'startupMinMaxSeconds must never exceed the triggered-MAX residence floor.'
+    }
+    if ($startupReleaseSamples -gt $releaseSamples) {
+        throw 'startupReleaseSamples must never exceed the evidence a triggered MAX needs to release.'
     }
     if ([int]$policy.releaseCpuC -ge [int]$policy.maxCpuC -or [int]$policy.maxCpuC -gt [int]$policy.criticalCpuC) {
         throw 'The release, demand and critical CPU thresholds are no longer ordered.'
@@ -139,6 +144,37 @@ try {
         throw 'The startup fail-safe MAX did not release once telemetry proved the machine cool.'
     }
     $caseResults.Add([ordered]@{ name = 'startup-max-releases-on-verified-cool'; status = 'PASS' })
+
+    # Regression for the 2026-08-24 resume: the machine was at 41 C with the fans at 6122 RPM
+    # because Windows was still busy finishing its own resume. Cool silicon plus non-idle load must
+    # release the *startup* default, and never before the startupMinMaxSeconds floor.
+    $samples = [System.Collections.Generic.List[object]]::new()
+    1..($startupHoldSamples + $startupReleaseSamples + 5) | ForEach-Object {
+        $samples.Add((New-Sample $coolCpu 0 $coolSystem $nonIdleLoad -MaxLogical $coolLogical))
+    }
+    $case = Invoke-SimulationCase -Name 'startup-max-releases-when-cool-but-busy' -InitialState MAX -Samples $samples -StartupMaxHold
+    if (@($case.result.transitions).Count -ne 1 -or
+        $case.result.transitions[0].reason -ne 'startup_max_released_on_verified_cool' -or
+        $case.status.state -ne 'AUTO' -or [bool]$case.status.startupMaxHold) {
+        throw 'A cold machine held the startup MAX because Windows was busy resuming.'
+    }
+    if (([datetimeoffset]$case.result.transitions[0].at) -lt $epoch.AddSeconds([int]$policy.startupMinMaxSeconds)) {
+        throw 'The startup MAX released before the startupMinMaxSeconds floor.'
+    }
+    $caseResults.Add([ordered]@{ name = 'startup-max-releases-when-cool-but-busy'; status = 'PASS' })
+
+    # The other half of the same contract: dropping the load term must not let a machine outside the
+    # thermal envelope leave the startup MAX, no matter how idle it is or how long it waits.
+    $samples = [System.Collections.Generic.List[object]]::new()
+    1..(($startupHoldSamples + $releaseSamples) * 2) | ForEach-Object {
+        $samples.Add((New-Sample $envelopeBreachCpu 0 $coolSystem $coolLoad -MaxLogical $coolLogical))
+    }
+    $case = Invoke-SimulationCase -Name 'startup-max-holds-outside-thermal-envelope' -InitialState MAX -Samples $samples -StartupMaxHold
+    if (@($case.result.transitions).Count -ne 0 -or $case.status.state -ne 'MAX' -or
+        [int]$case.status.coolSamples -ne 0 -or -not [bool]$case.status.startupMaxHold) {
+        throw 'The startup MAX released with the CPU outside the release envelope.'
+    }
+    $caseResults.Add([ordered]@{ name = 'startup-max-holds-outside-thermal-envelope'; status = 'PASS' })
 
     # A trigger firing while the startup hold is in force promotes it to the full residence:
     # from that point there is measured heat, not just an unproven default.

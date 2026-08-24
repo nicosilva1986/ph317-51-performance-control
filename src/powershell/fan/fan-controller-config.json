@@ -6,6 +6,8 @@
   "rpmMismatchSamples": 2,
   "minMaxSeconds": 120,
   "startupMinMaxSeconds": 60,
+  "startupReleaseSamples": 15,
+  "startupReleaseIgnoresLoad": true,
   "rpmReassertMinIntervalSeconds": 10,
   "verifyMaxAfterSeconds": 12,
   "telemetryEverySamples": 15,
