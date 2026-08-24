@@ -45,6 +45,7 @@ Closed questions with measurements attached. Read before re-opening any of them.
 | [undervolt-effectiveness-2026-08-24.md](undervolt-effectiveness-2026-08-24.md) | CPU undervolt firmware-locked; GPU undervolt a measured regression |
 | [acer-auto-curve-and-custom-mode-2026-08-24.md](acer-auto-curve-and-custom-mode-2026-08-24.md) | Acer's stock curve tops at 4761 RPM and goes flat 65–89 °C; CUSTOM mode validated |
 | [undervolt-unlock-analysis-2026-08-24.md](undervolt-unlock-analysis-2026-08-24.md) | A proposed BIOS setup-variable unlock targets the wrong lock; microcode 0xDE is reapplied every boot |
+| [powercfg-mui-failure-2026-08-24.md](powercfg-mui-failure-2026-08-24.md) | `powercfg` errors are a MUI version mismatch, not a broken power configuration — do not "repair" it |
 
 ## Meta / evidence interpretation
 
