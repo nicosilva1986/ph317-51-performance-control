@@ -11,6 +11,7 @@ Do not wire any of these into a scheduled task. They are meant to be watched.
 |----------|--------------|-------|
 | `EJECUTAR-Medicion.cmd` | Measures Acer's stock fan curve, then validates firmware `CUSTOM` mode | admin, ~25 min, **presence** |
 | `EJECUTAR-Limpieza.cmd` | Removes Afterburner/RivaTuner/HWiNFO, unpins ThrottleStop from startup, deploys the fan controller | admin, ~5 min |
+| `EJECUTAR-Desplegar.cmd` | Deploys the repository's calibration to the agent and nothing else | admin, ~1 min |
 | `EJECUTAR-StressTest.cmd` | Deploys the current calibration, then stresses CPU and GPU against it | admin, ~20 min, **presence** |
 
 ## EJECUTAR-Medicion.cmd
@@ -73,3 +74,19 @@ Aborts at 92 °C CPU, 88 °C GPU, or any WHEA event. Results land in
 `../evidence/benchmarks/2026-08-24-curve-stress.json` alongside the two
 reference points: Acer's stock AUTO (reached 92 °C, 4761 RPM ceiling) and
 forced MAX (79 °C max, 166 iterations).
+
+## EJECUTAR-Desplegar.cmd
+
+The small one. Compares the deployed config against the repository's, deploys
+transactionally if they differ, prints the calibration that is now active and
+watches until the controller releases its startup MAX.
+
+It exists because the useful action — put the current calibration on the
+machine — was only reachable through the cleanup script or a twenty-minute
+stress run, which is a bad answer to "the fans are at 6122 and I want that
+fixed now."
+
+Note the handover: a freshly deployed controller retakes its startup MAX and
+holds it until it can verify the machine cool, which with this calibration
+means CPU at or below `releaseCpuC` for 30 s. On a busy machine that wait is
+real. It is the fail-closed rule working, not a fault.
