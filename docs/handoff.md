@@ -218,16 +218,30 @@ a critical sample still commands MAX, and `curveEnabled false` is unchanged.
 
 ### Outstanding — in order
 
-1. **Deploy it.** `tools/EJECUTAR-Desplegar.cmd`. Until this runs the machine
-   keeps the old controller and the table above does nothing. This is the only
-   item blocking the feature from being real.
+1. ~~Deploy it.~~ **Done 2026-08-24 13:38.** Controller and config on the
+   machine match the repository; the deployed controller carries the handover
+   fix. Verified by hash, not by assumption.
 2. **Stress test.** `tools/EJECUTAR-StressTest.cmd` — CPU (same NumPy FMA
    workload as the 2026-08-21 benchmark, so iterations compare against the 166
    of forced MAX) then CPU+GPU, which no measurement here has covered yet.
 3. **Confirm the resume fix on hardware** (§4). Never verified in the field:
    one suspend/resume cycle, checking `profile_changed` lands ~60 s after
    `controller_started`.
-4. **Push `docs/handoff-2026-08-24` and open the PR.** Nine commits local.
+4. **If the noise still bothers the operator**, raise `curveMinTempC` and
+   `maxCpuC` together from 80 to 82. They must move as a pair — the calibration
+   contract asserts `curveMinTempC == maxCpuC` — and `releaseCpuC` must stay
+   below both.
+5. ~~Push and open the PR.~~ **Done:** PR #31.
+
+### Undervolt: do not reopen without reading this
+
+A third-party proposal to unlock undervolting through a hidden BIOS setup
+variable was reviewed on 2026-08-24 and **not attempted**. It targets CFG Lock,
+which governs `MSR 0xE2`, while the voltage offset lives behind `MSR 0x150`.
+The actual blocker is microcode `0xDE`, which Windows loads over the BIOS's
+pre-mitigation `0x9A` at every boot, so no setup variable can survive it.
+Analysis, risk notes and a thirty-second check nobody has run yet are in
+`research/undervolt-unlock-analysis-2026-08-24.md`.
 
 ### Known interference
 
