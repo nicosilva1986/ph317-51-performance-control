@@ -11,6 +11,7 @@ Do not wire any of these into a scheduled task. They are meant to be watched.
 |----------|--------------|-------|
 | `EJECUTAR-Medicion.cmd` | Measures Acer's stock fan curve, then validates firmware `CUSTOM` mode | admin, ~25 min, **presence** |
 | `EJECUTAR-Limpieza.cmd` | Removes Afterburner/RivaTuner/HWiNFO, unpins ThrottleStop from startup, deploys the fan controller | admin, ~5 min |
+| `EJECUTAR-StressTest.cmd` | Deploys the current calibration, then stresses CPU and GPU against it | admin, ~20 min, **presence** |
 
 ## EJECUTAR-Medicion.cmd
 
@@ -51,3 +52,24 @@ One-off host cleanup after the 2026-08 investigation, plus a transactional
 deploy of the fan controller through `Deploy-SecureAcerFanUpdate.ps1` (hashes
 verified, previous version backed up, automatic rollback). Pass `-SinDesplegar`
 to do the uninstalls without touching the agent.
+
+## EJECUTAR-StressTest.cmd
+
+Validates a calibration on hardware. Step 0 compares the deployed config
+against the repository's and deploys transactionally if they differ, so the
+run always measures what the repo says. Then CPU alone (NumPy float64
+6144x6144 matmul, eight threads — the same workload as
+`evidence/benchmarks/2026-08-21-fan-auto-vs-max.json`, so iteration counts are
+comparable), then CPU and GPU together, then a cool-down.
+
+It **writes nothing to the EC**: it samples the status document the controller
+already publishes, so the single-writer rule holds. The GPU half needs a load
+generator; FurMark was uninstalled during the 2026-08 cleanup, so the script
+offers to reinstall it through winget for the run and removes it again
+afterwards. Decline and it will wait for you to start a game instead, or skip
+the phase entirely with `-SinGpu`.
+
+Aborts at 92 °C CPU, 88 °C GPU, or any WHEA event. Results land in
+`../evidence/benchmarks/2026-08-24-curve-stress.json` alongside the two
+reference points: Acer's stock AUTO (reached 92 °C, 4761 RPM ceiling) and
+forced MAX (79 °C max, 166 iterations).
