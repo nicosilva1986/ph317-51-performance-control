@@ -193,14 +193,20 @@ works, attack the plateau):
 
 | CPU °C | Acer stock | This calibration |
 |--------|-----------|------------------|
-| 65 | 3846 | 3963 |
-| 70 | ~3800 | 4869 |
-| 75 | 3370 | **5454** |
-| 80 | 3370 | **5788** |
-| 85+ | 3750 | **6122** |
+| ≤ 79 | 2500–3846 | **untouched — Acer's own AUTO** |
+| 80 | 3370 | 3963 (55 %) |
+| 82 | 3370 | 5161 (75 %) |
+| 84 | ~3600 | 5955 (95 %) |
+| 85+ | 3750 | **6122 (100 %)** |
 
-`curveMinTempC 65 → curveMinPct 55`, `curveMaxTempC 85 → curveMaxPct 100`,
-`maxCpuC 65`, `releaseCpuC 60`, `curveEnabled true`.
+`curveMinTempC 80 → curveMinPct 55`, `curveMaxTempC 85 → curveMaxPct 100`,
+`maxCpuC 80`, `releaseCpuC 72`, `curveEnabled true`.
+
+Deliberately quiet: the band does not engage at all below 80 °C, so ordinary
+work runs on Acer's stock curve exactly as it always did, and maximum RPM is
+reserved for 85 °C — where `criticalCpuC` fires anyway, so both mechanisms
+agree. The trade the operator chose is explicit: the machine runs hotter for
+longer in exchange for silence, and Acer's curve alone permits 92 °C.
 
 **One structural bug found and fixed the same day.** The band was enabled,
 calibrated, and never engaged once: release only ever targets AUTO and is gated

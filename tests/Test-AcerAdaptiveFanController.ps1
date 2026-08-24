@@ -82,7 +82,20 @@ try {
     $criticalCpu = [int]$policy.criticalCpuC + 1
     $envelopeBreachCpu = [int]$policy.releaseCpuC + 2
     $riseCpu = [int]$policy.preemptTemperatureC + 1
-    $jitterCpu = $coolCpu + [int]$policy.releaseRiseToleranceC + 2
+    # Un disturbio de rapid-rise tiene que subir al menos riseTriggerC desde el piso y quedar
+    # por encima de preemptTemperatureC, sin salirse del sobre de release: si se sale, el caso
+    # mide una violacion de sobre en vez del rise. preemptTemperatureC+1 solo alcanzaba mientras
+    # coolCpu estuviera muy por debajo, y dejo de estarlo al mover los umbrales.
+    $riseInsideEnvelopeCpu = [math]::Max([int]$policy.preemptTemperatureC, [int]$coolCpu + [int]$policy.riseTriggerC)
+    # La sacudida tiene que superar releaseRiseToleranceC, para que el chequeo de tendencia
+    # bloquee el release en esa muestra, sin alcanzar riseTriggerC: si lo alcanza dispara
+    # rapid-rise, que resetea el contador, y el caso deja de medir tolerancia para medir
+    # preempcion. Con umbrales juntos un +2 fijo cruzaba esa linea.
+    $jitterCpu = $coolCpu + [int]$policy.releaseRiseToleranceC + 1
+    if (($jitterCpu - $coolCpu) -le [int]$policy.releaseRiseToleranceC -or
+        ($jitterCpu - $coolCpu) -ge [int]$policy.riseTriggerC) {
+        throw 'The jitter fixture no longer sits between the trend tolerance and the rapid-rise trigger.'
+    }
 
     $epoch = [datetimeoffset]'2026-01-01T00:00:00Z'
     # The simulated clock is deterministic: sample n is observed at (n - 1) * pollSeconds.
@@ -99,6 +112,9 @@ try {
     }
     if ([int]$policy.releaseCpuC -ge [int]$policy.maxCpuC -or [int]$policy.maxCpuC -gt [int]$policy.criticalCpuC) {
         throw 'The release, demand and critical CPU thresholds are no longer ordered.'
+    }
+    if ($riseInsideEnvelopeCpu -gt [int]$policy.releaseCpuC) {
+        throw 'A rapid rise can no longer be produced inside the release envelope.'
     }
     if ([int]$policy.preemptTemperatureC -ge [int]$policy.releaseCpuC) {
         throw 'preemptTemperatureC must stay below releaseCpuC, otherwise a rapid rise inside the release envelope is unreachable.'
@@ -262,7 +278,9 @@ try {
     # Puntos derivados de la banda configurada. Antes eran temperaturas y porcentajes fijos
     # atados a la calibracion 45-75 C / 30-100 %, asi que recalibrar leia como curva rota.
     $cBand       = [double]$curveConfig.curveMaxTempC - [double]$curveConfig.curveMinTempC
-    $tInsideLow  = [double]$curveConfig.curveMinTempC + $cBand * 0.10
+    # El piso de la banda, no un punto "dentro": con bandas angostas cualquier fraccion
+    # del ancho cae dentro de la histeresis de bajada y el caso deja de medir el escalon.
+    $tInsideLow  = [double]$curveConfig.curveMinTempC
     $tInsideHigh = [double]$curveConfig.curveMinTempC + $cBand * 0.75
 
     # Linear interpolation, clamped at both ends, quantised upward so a step never commands less
@@ -343,7 +361,9 @@ try {
     }
     $caseResults.Add([ordered]@{ name = 'curve-decrease-respects-hysteresis'; status = 'PASS' })
 
-    if ($tInsideLow -ge $releaseTemperature) { throw 'tInsideLow must sit below the falling hysteresis edge.' }
+    if ($tInsideLow -gt ($releaseTemperature - [double]$curveConfig.curveDecreaseHysteresisC)) {
+        throw 'tInsideLow must sit below the falling hysteresis edge, not merely below the release temperature.'
+    }
     $command = Get-CurveCommand -AveragedTemperatureC $tInsideLow -CurrentPercent $pInsideHigh -SecondsSinceLastChange 600 -Configuration $curveConfig
     if (-not $command.changed -or $command.percent -ne $pInsideLow -or $command.reason -ne 'curve_decrease') {
         throw "Curve never stepped down: got $($command.percent) % ($($command.reason))."
@@ -496,12 +516,20 @@ try {
     $caseResults.Add([ordered]@{ name = 'isolated-logical-load'; status = 'PASS' })
 
     # A continuing ramp past preemptTemperatureC, still below maxCpuC, so only the rise triggers.
-    $samples = @(
-        (New-Sample $coolCpu 0 $coolSystem $coolLoad),
-        (New-Sample $riseCpu 0 $coolSystem $coolLoad),
-        (New-Sample ($riseCpu + 3) 0 $coolSystem $coolLoad),
-        (New-Sample ($riseCpu + 6) 0 $coolSystem $coolLoad)
-    )
+    # La rampa se deriva de riseTriggerC: con umbrales juntos, un +3/+6 fijo deja de superar el
+    # disparo y el caso pasaba a medir nada. Cada escalon sube riseTriggerC y hacen falta
+    # enterSamples muestras con el disparo activo.
+    $riseStep = [int]$policy.riseTriggerC
+    $riseBase = [math]::Max([int]$riseCpu, [int]$coolCpu + $riseStep)
+    $samples = [System.Collections.Generic.List[object]]::new()
+    $samples.Add((New-Sample $coolCpu 0 $coolSystem $coolLoad))
+    for ($i = 0; $i -lt ($enterSamples + 1); $i++) {
+        $rampTemp = $riseBase + ($i * $riseStep)
+        if ($rampTemp -ge [int]$policy.maxCpuC) {
+            throw 'The rapid-rise ramp reaches maxCpuC, so it would no longer isolate the rise trigger.'
+        }
+        $samples.Add((New-Sample $rampTemp 0 $coolSystem $coolLoad))
+    }
     $case = Invoke-SimulationCase -Name 'rapid-temperature-rise' -InitialState AUTO -Samples $samples
     if (@($case.result.transitions).Count -ne 1 -or $case.result.transitions[0].reason -ne 'rapid_temperature_rise') { throw 'Rapid-rise preemption failed.' }
     $caseResults.Add([ordered]@{ name = 'rapid-temperature-rise'; status = 'PASS' })
@@ -663,7 +691,7 @@ try {
         @{
             name = 'rapid-rise-resets-release'
             message = 'A rapid rise inside the release envelope did not reset the cool interval.'
-            disturbance = { , (New-Sample $riseCpu 0 $coolSystem $coolLoad $coolLogical) }
+            disturbance = { , (New-Sample $riseInsideEnvelopeCpu 0 $coolSystem $coolLoad $coolLogical) }
         }
     )
     foreach ($resetCase in $resetCases) {
