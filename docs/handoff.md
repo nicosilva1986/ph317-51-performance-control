@@ -233,6 +233,23 @@ a critical sample still commands MAX, and `curveEnabled false` is unchanged.
    below both.
 5. ~~Push and open the PR.~~ **Done:** PR #31.
 
+### Accepted behaviour — do not "fix" these without asking
+
+Two rough edges were measured on 2026-08-24, offered to the operator, and
+**deliberately left alone**. They are not defects to be discovered again.
+
+- **~60 s at 6122 RPM after every boot or resume.** The `startupMinMaxSeconds`
+  floor. Verified on the 13:44 reboot: MAX at 13:47:08, handed to the band at
+  13:47:50, 62 seconds. Shortening the floor to 30 s was offered and declined.
+- **The startup hold hands over to the band, not to AUTO, even below
+  `curveMinTempC`.** So a machine at 62–70 °C sits at the 55 % floor (~4000 RPM)
+  rather than on Acer's ~3800, until the release gate (`releaseCpuC` 72 °C plus
+  `releaseCpuLoadPct` 40 %) is satisfied. Handing over to AUTO below the band
+  floor was offered and declined.
+
+Both were understood and accepted in exchange for not touching a working
+policy again. Raise them only if the operator complains about boot noise.
+
 ### Undervolt: do not reopen without reading this
 
 A third-party proposal to unlock undervolting through a hidden BIOS setup
