@@ -158,14 +158,7 @@ Ranked by expected value now that undervolt is off the table:
 1. **Nothing further on CPU voltage.** Firmware-locked. Closed.
 2. **Confirm the resume fix on hardware** (§4) — one suspend/resume cycle,
    checking `profile_changed` lands ~60 s after `controller_started`.
-3. **Proportional fan curve** — in the tree, still `curveEnabled: false`, but
-   the blocking measurement is now done (2026-08-24). Firmware CUSTOM mode is
-   `CUSTOM_VALIDO`: 40/60/80/100 % gave 3000/4285/5454/6122 RPM, monotonic, mode
-   held at 3 in 80/80 samples. Acer's own AUTO tops out at **4761 RPM** and goes
-   **flat between 65 °C and 89 °C** (~3370–3846 RPM), so the band has real room
-   to work in. Remaining work is choosing the calibration and validating it
-   against the FMA benchmark. See
-   `research/acer-auto-curve-and-custom-mode-2026-08-24.md`.
+3. **Proportional fan curve — built, calibrated, NOT YET DEPLOYED.** See §7.
 4. **Limit telemetry** — read-only sampler on branch
    `codex/issue-9-limit-telemetry-read`. Tells us *which* limit binds
    (power, thermal, current) instead of inferring it.
@@ -184,3 +177,56 @@ Unchanged from `AGENTS.md`, restated because they bound everything above:
 - No BIOS, PL1/PL2/PL4, IccMax, voltage or thermal-protection changes as part of
   routine fan/power work.
 - No readback, no success claim.
+
+---
+
+## 7. Proportional band — state as of 2026-08-24
+
+**Measured and settled.** Firmware CUSTOM mode is `CUSTOM_VALIDO`: 40/60/80/100 %
+returned 3000/4285/5454/6122 RPM, monotonic, fan mode held at 3 for all 80
+samples. Acer's own AUTO tops out at **4761 RPM** of 6122 and goes **flat
+between 65 °C and 89 °C** (~3370–3846 RPM) while letting the package reach
+92 °C. Details in `research/acer-auto-curve-and-custom-mode-2026-08-24.md`.
+
+**Calibration shipped in the repo** (conservative: match Acer where Acer still
+works, attack the plateau):
+
+| CPU °C | Acer stock | This calibration |
+|--------|-----------|------------------|
+| 65 | 3846 | 3963 |
+| 70 | ~3800 | 4869 |
+| 75 | 3370 | **5454** |
+| 80 | 3370 | **5788** |
+| 85+ | 3750 | **6122** |
+
+`curveMinTempC 65 → curveMinPct 55`, `curveMaxTempC 85 → curveMaxPct 100`,
+`maxCpuC 65`, `releaseCpuC 60`, `curveEnabled true`.
+
+**One structural bug found and fixed the same day.** The band was enabled,
+calibrated, and never engaged once: release only ever targets AUTO and is gated
+on `releaseCpuC`, so a machine that stays busy never leaves the startup MAX, and
+the band is only entered from AUTO. Measured: 32 consecutive samples at
+64–82 °C with `coolSamples` at 0 and `curvePercent` at 0 while the fans held
+6122 RPM. The startup MAX now hands over to the band once its floor elapses —
+a critical sample still commands MAX, and `curveEnabled false` is unchanged.
+
+### Outstanding — in order
+
+1. **Deploy it.** `tools/EJECUTAR-Desplegar.cmd`. Until this runs the machine
+   keeps the old controller and the table above does nothing. This is the only
+   item blocking the feature from being real.
+2. **Stress test.** `tools/EJECUTAR-StressTest.cmd` — CPU (same NumPy FMA
+   workload as the 2026-08-21 benchmark, so iterations compare against the 166
+   of forced MAX) then CPU+GPU, which no measurement here has covered yet.
+3. **Confirm the resume fix on hardware** (§4). Never verified in the field:
+   one suspend/resume cycle, checking `profile_changed` lands ~60 s after
+   `controller_started`.
+4. **Push `docs/handoff-2026-08-24` and open the PR.** Nine commits local.
+
+### Known interference
+
+A recursive BIOS-file scan (`*.fd`, `*.rom`, `*.cap` across `C:\Windows`,
+`AppData`, `ProgramData`) was running from another session at 99 % CPU during
+the 2026-08-24 work, holding the package at 79–82 °C. Any thermal measurement
+taken while something like that runs describes the scan, not the fan policy.
+Check `Win32_Process` for unexpected load before trusting a run.
