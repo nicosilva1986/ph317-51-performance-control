@@ -25,3 +25,6 @@ tests/*-test-result.json
 .idea/
 Thumbs.db
 Desktop.ini
+
+# Transcripts de las herramientas de laboratorio (contienen nombres de maquina)
+tools/*.log
