@@ -1,0 +1,171 @@
+# Handoff — state of play
+
+Last updated: **2026-08-24**
+
+Living document. It answers, for whoever picks this up next: what is actually
+running on the reference machine, which levers were proven to work, which were
+proven dead, and what is safe to remove.
+
+Implementation detail lives in the rest of `docs/`; investigation lives in
+`research/`. This file is the short version with the conclusions.
+
+---
+
+## 1. What is deployed right now
+
+| Component | Location | State |
+|-----------|----------|-------|
+| Adaptive fan controller (primary writer) | `%ProgramData%\AcerAdaptiveFanControl` | Running, `HEALTHY_VERIFIED` |
+| Fan watchdog (supervisor) | same folder | Running |
+| Rollback snapshot | `%ProgramData%\AcerAdaptiveFanControl-Rollback` | Present, install id `20260823-121745` |
+| Deployment journal | `%ProgramData%\AcerAdaptiveFanDeployments` | Present |
+| Published status (read-only, unprivileged) | `adaptive-fan-status.json` | Fresh |
+
+Routine health check stays `src/powershell/fan/Get-AcerFanAgentStatus.ps1`.
+Do not query the protected scheduled tasks directly (see `AGENTS.md`).
+
+Secure install of 2026-08-23 reported `status: PASS`, `aclVerified: true`,
+`hashesVerified: true`, no rollback needed.
+
+---
+
+## 2. The one lever that is proven to work
+
+**Forcing fans to maximum via `AcerGamingFunction` WMI/ACPI.**
+
+Measured on the reference machine (`evidence/benchmarks/2026-08-21-fan-auto-vs-max.json`),
+10 min sustained AVX2/FMA matrix multiply, CPU pinned at 28x:
+
+| | Acer Auto fans | Forced Max fans | Delta |
+|---|---|---|---|
+| Max CPU temp | 91.0 °C | 79.0 °C | **-12.0 °C** |
+| Average CPU temp | 86.8 °C | 76.3 °C | **-10.5 °C** |
+| Iterations completed | 153 | 166 | **+8.5 %** |
+| WHEA events | 0 | 0 | — |
+
+This is the project's justification. Acer's stock Auto curve lets the part sit
+in the high 80s / low 90s under sustained load; the fan overlay buys ~12 °C and
+~8.5 % throughput with no stability cost.
+
+---
+
+## 3. Levers that are proven dead — do not spend more time here
+
+### 3.1 CPU undervolt via ThrottleStop — **blocked by firmware**
+
+A -99.6 mV offset is configured on core and cache of the active profile
+(`FIVRVoltage00` / `FIVRVoltage20` = `0xF3400000`, `UnlockVoltage00/20 = 1`)
+and ThrottleStop accepts it in the UI without error.
+
+**It never reaches the silicon.** VID sampled under load at a fixed 28x
+multiplier is flat across a full month spanning the change:
+
+| Date | Samples | Mean VID at 28x |
+|------|---------|-----------------|
+| 2026-07-23 | 9 651 | 0.9213 V |
+| 2026-07-25 | 6 320 | 0.9255 V |
+| 2026-07-27 | 19 115 | 0.9263 V |
+| 2026-08-21 | 2 897 | 0.9270 V |
+| 2026-08-22 | 5 012 | 0.9356 V |
+| 2026-08-23 | 53 | 0.9250 V |
+
+Total spread 14 mV — binning and sampling noise. A working -100 mV offset would
+show as a ~100 mV step down to roughly 0.82 V. There is no step.
+
+Cause: the CVE-2019-11157 ("Plundervolt") mitigation. Acer's Kaby Lake microcode
+makes MSR `0x150` writes a silent no-op. Nothing in software can re-open it;
+this is a firmware decision, not a configuration mistake.
+
+**Consequence:** ThrottleStop has no undervolt value on this machine. It is
+still useful as a *logger* (the VID/FID/temperature history above is what made
+this determination possible) and for multiplier caps, but it will never lower
+voltage here. See `research/undervolt-effectiveness-2026-08-24.md`.
+
+### 3.2 GPU undervolt via Afterburner — **measured regression, revert it**
+
+Before/after under a 180 s loaded run:
+
+| Metric | Before | After | Verdict |
+|--------|--------|-------|---------|
+| Mean SM clock | 1388 MHz | 1261 MHz | **-127 MHz (-9.2 %)** |
+| P05 SM clock | 1341 MHz | 1227 MHz | -114 MHz |
+| Mean power | 81.7 W | 83.6 W | **higher** |
+| % time power-capped | 64 % | 78.8 % | **worse** |
+| % time thermal-capped | 0 % | 0 % | never the binding limit |
+| Max temp | 86 °C | 83 °C | -3 °C |
+
+A correct undervolt trades voltage for *more* clock at the same power. This one
+lost 9 % of clock while drawing slightly more power and hitting the power cap
+more often — the V/F curve was flattened at too low a point. The 3 °C is bought
+with performance, and the GPU was never thermally capped to begin with.
+
+**Action:** revert the Afterburner V/F curve to stock. Do not re-apply without a
+run that shows clock held or improved.
+
+### 3.3 Thermal paste — not the problem
+
+MX-6, applied ~2025-08. Idle package temperature after resume settles at
+**41–43 °C** with fans at ~1 950 RPM. That is a healthy mount; degraded paste
+shows up as a high idle floor and it is not present. Repasting would not move
+the numbers that matter here.
+
+---
+
+## 4. Open incident closed on 2026-08-24 — fans at 100 % after resume
+
+Reported symptom: fans at full speed after restarting the machine.
+
+Not a fault, and not thermal. Full reconstruction in
+`research/fan-max-on-resume-2026-08-24.md`. Summary:
+
+1. Machine slept overnight; the controller stopped sampling with it.
+2. On resume the watchdog saw the heartbeat stale by 32 646 s (~9 h 04 m) and
+   restarted the primary controller — correct fail-closed behaviour.
+3. A restarted controller enters `startupMaxHold`: fans are pinned at maximum
+   until the machine is *verified* cool. Invalid or unknown state must fail
+   toward maximum cooling (`AGENTS.md`), so a cold boot into MAX is by design.
+4. Release needs 30 consecutive cool samples at 2 s. The Windows resume/logon
+   CPU burst (47 % load) sits above `releaseCpuLoadPct: 40` and kept resetting
+   the counter — visible as `coolSamples` going 10 → 8.
+5. Released cleanly at 08:13:02, `startup_max_released_on_verified_cool`.
+   Fans dropped 6 122 → ~1 950 RPM. Total noise window **3 min 30 s**.
+
+The design held. The cost is up to a few minutes of full-speed fans on every
+resume-from-sleep, which reads to the operator as a failure.
+
+**Proposed follow-up (not implemented, needs a decision):** gate the release
+counter on temperature alone once the startup hold has elapsed, or exempt the
+first ~90 s after a resume from the load term. Both keep the fail-closed
+guarantee while cutting the noise window to roughly the intended 60 s. Do not
+weaken the temperature gate.
+
+---
+
+## 5. Where the remaining headroom is
+
+Ranked by expected value now that undervolt is off the table:
+
+1. **Nothing further on CPU voltage.** Firmware-locked. Closed.
+2. **Fan policy tuning** — shorter, quieter recovery after resume (§4).
+   Cheap, purely software, improves perceived behaviour.
+3. **Proportional fan curve** — already in the tree, `curveEnabled: false`.
+   Would replace the binary Auto/Max overlay with a band. Needs a measured run
+   before being enabled by default.
+4. **Limit telemetry** — read-only sampler on branch
+   `codex/issue-9-limit-telemetry-read`. Tells us *which* limit binds
+   (power, thermal, current) instead of inferring it.
+5. **Physical** — fan/heatsink dust removal is the only untried hardware lever;
+   paste is fine (§3.3).
+
+---
+
+## 6. Standing constraints
+
+Unchanged from `AGENTS.md`, restated because they bound everything above:
+
+- One privileged writer per control plane.
+- Invalid telemetry, state, integrity or heartbeat **must** fail toward maximum
+  cooling. The 100 %-fan behaviour in §4 is this rule working, not a bug.
+- No BIOS, PL1/PL2/PL4, IccMax, voltage or thermal-protection changes as part of
+  routine fan/power work.
+- No readback, no success claim.

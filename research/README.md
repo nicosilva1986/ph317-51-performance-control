@@ -35,6 +35,15 @@ How peers solve the same class of problem; what to borrow without leaving WMI.
 |----------|---------|
 | [cross-vendor-control-landscape.md](cross-vendor-control-landscape.md) | ASUS/Lenovo/MSI/NBFC/etc.; official API vs EC poke |
 
+## Incidents / verdicts
+
+Closed questions with measurements attached. Read before re-opening any of them.
+
+| Document | Purpose |
+|----------|---------|
+| [fan-max-on-resume-2026-08-24.md](fan-max-on-resume-2026-08-24.md) | Fans at 100 % after resume: fail-closed startup hold, not a fault |
+| [undervolt-effectiveness-2026-08-24.md](undervolt-effectiveness-2026-08-24.md) | CPU undervolt firmware-locked; GPU undervolt a measured regression |
+
 ## Meta / evidence interpretation
 
 Repo process, coverage maps, and reading of local measurements (not raw JSON).
@@ -60,6 +69,7 @@ Repo process, coverage maps, and reading of local measurements (not raw JSON).
 
 ## Related production docs
 
+- [docs/handoff.md](../docs/handoff.md) — state of play: what runs, what works, what is closed
 - [docs/wmi-surface.md](../docs/wmi-surface.md)
 - [docs/architecture.md](../docs/architecture.md)
 - [docs/native-turbo-plan.md](../docs/native-turbo-plan.md)
