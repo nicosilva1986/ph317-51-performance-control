@@ -364,6 +364,44 @@ try {
     $pCurveHot  = [int](Get-CurveTargetPercent -TemperatureC ([double]$tCurveHot) -Configuration $curveConfig)
     if ($pCurveHot -le $pCurveCool) { throw 'The end-to-end curve points do not straddle a percentage change.' }
 
+    # Una maquina caliente y ocupada nunca alcanza releaseCpuC, y el release solo apunta a AUTO.
+    # Sin entrega a la banda, el MAX de arranque se queda en 6122 RPM para siempre y la curva
+    # jamas actua. Medido en hardware el 2026-08-24: 32 muestras seguidas a 64-82 C, cool 0.
+    $samples = [System.Collections.Generic.List[object]]::new()
+    1..($startupHoldSamples + 10) | ForEach-Object {
+        $samples.Add((New-Sample $tCurveHot 0 $coolSystem $busyLoad -MaxLogical $coolLogical))
+    }
+    $case = Invoke-SimulationCase -Name 'startup-max-hands-over-to-curve' -InitialState MAX -Samples $samples -StartupMaxHold -CurveEnabled
+    $handover = @($case.result.transitions | Where-Object { $_.reason -eq 'startup_max_handed_to_curve' })
+    if ($handover.Count -ne 1 -or $handover[0].from -ne 'MAX' -or $handover[0].to -ne 'CURVE' -or
+        $case.status.state -ne 'CURVE' -or [int]$case.status.curvePercent -ne $pCurveHot -or
+        [bool]$case.status.startupMaxHold) {
+        throw "The startup MAX never handed over to the band: state=$($case.status.state) percent=$($case.status.curvePercent)."
+    }
+    $caseResults.Add([ordered]@{ name = 'startup-max-hands-over-to-curve'; status = 'PASS' })
+
+    # La entrega es proporcional, no incondicional: una muestra critica sigue exigiendo MAX.
+    $samples = [System.Collections.Generic.List[object]]::new()
+    1..($startupHoldSamples + 10) | ForEach-Object {
+        $samples.Add((New-Sample $criticalCpu 0 $coolSystem $busyLoad -MaxLogical $coolLogical))
+    }
+    $case = Invoke-SimulationCase -Name 'startup-max-never-hands-over-when-critical' -InitialState MAX -Samples $samples -StartupMaxHold -CurveEnabled
+    if (@($case.result.transitions | Where-Object { $_.to -eq 'CURVE' }).Count -ne 0 -or $case.status.state -ne 'MAX') {
+        throw 'A critical machine handed the startup MAX to the proportional band.'
+    }
+    $caseResults.Add([ordered]@{ name = 'startup-max-never-hands-over-when-critical'; status = 'PASS' })
+
+    # Con la banda apagada no hay a donde entregar: el comportamiento anterior queda intacto.
+    $samples = [System.Collections.Generic.List[object]]::new()
+    1..($startupHoldSamples + 10) | ForEach-Object {
+        $samples.Add((New-Sample $tCurveHot 0 $coolSystem $busyLoad -MaxLogical $coolLogical))
+    }
+    $case = Invoke-SimulationCase -Name 'startup-max-without-curve-still-holds' -InitialState MAX -Samples $samples -StartupMaxHold
+    if (@($case.result.transitions).Count -ne 0 -or $case.status.state -ne 'MAX') {
+        throw 'With the band disabled the startup MAX left anyway.'
+    }
+    $caseResults.Add([ordered]@{ name = 'startup-max-without-curve-still-holds'; status = 'PASS' })
+
     # End to end: demanda en frio debe llegar a la banda proporcional, no a 6122 RPM.
     $curveDemand = [System.Collections.Generic.List[object]]::new()
     1..$demandSamples | ForEach-Object { $curveDemand.Add((New-Sample $tCurveCool 0 $coolSystem $busyLoad)) }

@@ -703,6 +703,33 @@ try {
                     $lastMaxWriteSeconds = $elapsedSeconds
                     $rpmMismatchSamples = 0
                 }
+                elseif ($startupRelease -and $script:CurveEnabled -and $state -eq 'MAX' -and
+                        -not $critical -and $heldSeconds -ge $minimumHeldSeconds) {
+                    # The startup MAX stands in for a temperature nobody had measured yet. Once the
+                    # floor has elapsed and telemetry is valid, that temperature IS known, and the
+                    # proportional band is a measured answer to it. Holding 100 % past this point is
+                    # not failing closed, it is refusing to use a reading already in hand: release
+                    # only ever targets AUTO, so on a machine that stays above releaseCpuC the fans
+                    # would sit at maximum indefinitely with the band never engaging at all.
+                    # A hot machine loses nothing -- the curve answers 82 C with ~95 % -- while a
+                    # merely warm one stops being pinned at 6122 RPM.
+                    $handoverPercent = Get-CurveTargetPercent -TemperatureC $curveTemperature -Configuration $script:Config
+                    Set-HardwareFanProfile -Profile 'CURVE' -Percent $handoverPercent
+                    $curvePercent = $handoverPercent
+                    $curveLastChangeSeconds = $elapsedSeconds
+                    $state = 'CURVE'
+                    $startupMaxHold = $false
+                    $maxVerificationPending = $false
+                    $maxSince = $now
+                    $maxSinceSeconds = $elapsedSeconds
+                    $lastMaxWrite = $now
+                    $lastMaxWriteSeconds = $elapsedSeconds
+                    $rpmMismatchSamples = 0
+                    $coolSamples = 0
+                    $transition = [ordered]@{ at = $now.ToString('o'); from = 'MAX'; to = 'CURVE'; reason = 'startup_max_handed_to_curve' }
+                    $transitionHistory.Add($transition)
+                    Write-ControllerEvent -Event 'profile_changed' -Data $transition
+                }
                 elseif ($state -eq 'CURVE' -and -not $simulation) {
                     # CURVE is firmware mode 3. Anything else means something overwrote the mode,
                     # so re-issue the current percentage rather than falling back to 100 %.
