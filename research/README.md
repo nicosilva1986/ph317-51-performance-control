@@ -43,6 +43,7 @@ Closed questions with measurements attached. Read before re-opening any of them.
 |----------|---------|
 | [fan-max-on-resume-2026-08-24.md](fan-max-on-resume-2026-08-24.md) | Fans at 100 % after resume: fail-closed startup hold, not a fault |
 | [undervolt-effectiveness-2026-08-24.md](undervolt-effectiveness-2026-08-24.md) | CPU undervolt firmware-locked; GPU undervolt a measured regression |
+| [acer-auto-curve-and-custom-mode-2026-08-24.md](acer-auto-curve-and-custom-mode-2026-08-24.md) | Acer's stock curve tops at 4761 RPM and goes flat 65–89 °C; CUSTOM mode validated |
 
 ## Meta / evidence interpretation
 

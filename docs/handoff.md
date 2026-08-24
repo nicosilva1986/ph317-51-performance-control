@@ -158,9 +158,14 @@ Ranked by expected value now that undervolt is off the table:
 1. **Nothing further on CPU voltage.** Firmware-locked. Closed.
 2. **Confirm the resume fix on hardware** (§4) — one suspend/resume cycle,
    checking `profile_changed` lands ~60 s after `controller_started`.
-3. **Proportional fan curve** — already in the tree, `curveEnabled: false`.
-   Would replace the binary Auto/Max overlay with a band. Needs a measured run
-   before being enabled by default.
+3. **Proportional fan curve** — in the tree, still `curveEnabled: false`, but
+   the blocking measurement is now done (2026-08-24). Firmware CUSTOM mode is
+   `CUSTOM_VALIDO`: 40/60/80/100 % gave 3000/4285/5454/6122 RPM, monotonic, mode
+   held at 3 in 80/80 samples. Acer's own AUTO tops out at **4761 RPM** and goes
+   **flat between 65 °C and 89 °C** (~3370–3846 RPM), so the band has real room
+   to work in. Remaining work is choosing the calibration and validating it
+   against the FMA benchmark. See
+   `research/acer-auto-curve-and-custom-mode-2026-08-24.md`.
 4. **Limit telemetry** — read-only sampler on branch
    `codex/issue-9-limit-telemetry-read`. Tells us *which* limit binds
    (power, thermal, current) instead of inferring it.
