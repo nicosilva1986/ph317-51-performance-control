@@ -33,3 +33,6 @@
 - Restricted PnPUtil success handling to documented exit codes 0/3010 plus independent live-state proof; all contradictory or undocumented results enter a protected diagnostic hold.
 - Made the first green postboot result a non-final stability checkpoint; recovery facilities remain enabled until a later separately reviewed finalization.
 - Recorded sanitized evidence that Windows repeatedly promoted the signed CRUW demand-start INF service to boot-start, while retaining exact live-state proof as the only rollback authority.
+- Added a full-tree improvement review (`docs/improvement-review.md`) cross-checked against mainline `acer-wmi`, which confirmed every documented WMI encoding and the CRUW sealed-bootstrap trust chain, and recorded ten ranked gaps — chief among them a watchdog that restarts a healthy controller during normal fan spin-up, an exact-value firmware mode compare that bypasses the documented bitfield masks, and a simulation harness that cannot reach the readback and reassertion paths.
+- Fixed CI parse-failure reporting: `${($_.FullName)}` resolved to an empty variable name, so both parse steps would have named no file.
+- Marked the Auto/Max benchmark in the README as fan-only at the fixed 28x multiplier, since the native Turbo migration invalidates it.

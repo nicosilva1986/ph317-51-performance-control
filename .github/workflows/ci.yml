@@ -27,7 +27,7 @@ jobs:
             $errors = $null
             [Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$errors) | Out-Null
             if (@($errors).Count) {
-              $failed += "${($_.FullName)}: $(@($errors).Message -join '; ')"
+              $failed += "$($_.FullName): $(@($errors).Message -join '; ')"
             }
           }
           if ($failed.Count) { throw ($failed -join [Environment]::NewLine) }
@@ -41,7 +41,7 @@ jobs:
             $errors = $null
             [Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$errors) | Out-Null
             if (@($errors).Count) {
-              $failed += "${($_.FullName)}: $(@($errors).Message -join '; ')"
+              $failed += "$($_.FullName): $(@($errors).Message -join '; ')"
             }
           }
           if ($failed.Count) { throw ($failed -join [Environment]::NewLine) }
